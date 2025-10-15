@@ -27,7 +27,6 @@ from manila import exception
 from manila.i18n import _
 from manila.share import driver
 
-HAS_PURITY_FB = True
 try:
     import purity_fb
 except ImportError:
@@ -102,10 +101,11 @@ class FlashBladeShareDriver(driver.ShareDriver):
        6.0.0 - Bobcat release
        7.0.0 - 2024.1 (Caracal) release
        8.0.0 - 2025.1 (Epoxy) release
+       9.0.0 - 2025.2 (Flamingo) release
 
     """
 
-    VERSION = "8.0"  # driver version
+    VERSION = "9.0"  # driver version
     USER_AGENT_BASE = "OpenStack Manila"
 
     def __init__(self, *args, **kwargs):

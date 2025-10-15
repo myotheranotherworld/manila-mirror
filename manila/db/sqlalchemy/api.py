@@ -504,6 +504,13 @@ def _sync_replica_gigabytes(context, project_id, user_id, share_type_id=None):
     return {'replica_gigabytes': replica_gigs}
 
 
+def _sync_encryption_keys(context, project_id, user_id, share_type_id=None):
+    encryption_keys = _count_encryption_keys_for_project(
+        context, project_id, user_id
+    )
+    return {'encryption_keys': encryption_keys}
+
+
 QUOTA_SYNC_FUNCTIONS = {
     '_sync_shares': _sync_shares,
     '_sync_snapshots': _sync_snapshots,
@@ -516,6 +523,7 @@ QUOTA_SYNC_FUNCTIONS = {
     '_sync_replica_gigabytes': _sync_replica_gigabytes,
     '_sync_backups': _sync_backups,
     '_sync_backup_gigabytes': _sync_backup_gigabytes,
+    '_sync_encryption_keys': _sync_encryption_keys,
 }
 
 
@@ -1619,7 +1627,7 @@ def _extract_share_instance_values(values):
         'status', 'host', 'scheduled_at', 'launched_at', 'terminated_at',
         'share_server_id', 'share_network_id', 'availability_zone_id',
         'replica_state', 'share_type_id', 'share_type', 'access_rules_status',
-        'mount_point_name',
+        'mount_point_name', 'encryption_key_ref',
     ]
     share_instance_values, share_values = (
         _extract_subdict_by_fields(values, share_instance_model_fields)
@@ -1850,6 +1858,11 @@ def _share_instance_get_all(context, filters=None):
     status = filters.get('status')
     if status:
         query = query.filter(models.ShareInstance.status == status)
+
+    encryption_key_ref = filters.get('encryption_key_ref')
+    if encryption_key_ref:
+        query = query.filter(
+            models.ShareInstance.encryption_key_ref == encryption_key_ref)
 
     # Returns list of share instances that satisfy filters.
     query = query.all()
@@ -2222,7 +2235,8 @@ def _process_share_filters(query, filters, project_id=None, is_public=False):
     share_filter_keys = ['share_group_id', 'snapshot_id',
                          'is_soft_deleted', 'source_backup_id']
     instance_filter_keys = ['share_server_id', 'status', 'share_type_id',
-                            'host', 'share_network_id']
+                            'host', 'share_network_id', 'mount_point_name',
+                            'encryption_key_ref']
     share_filters = {}
     instance_filters = {}
 
@@ -2252,6 +2266,7 @@ def _process_share_filters(query, filters, project_id=None, is_public=False):
         else:
             query = query.filter(models.Share.project_id == project_id)
 
+    safe_regex_filter, db_regexp_op = _get_regexp_ops(CONF.database.connection)
     display_name = filters.get('display_name')
     if display_name:
         query = query.filter(
@@ -2259,8 +2274,10 @@ def _process_share_filters(query, filters, project_id=None, is_public=False):
     else:
         display_name = filters.get('display_name~')
         if display_name:
-            query = query.filter(models.Share.display_name.op('LIKE')(
-                u'%' + display_name + u'%'))
+            query = query.filter(
+                models.Share.display_name.op(db_regexp_op)(
+                    _get_filter_value_by_op(
+                        db_regexp_op, display_name, safe_regex_filter)))
 
     display_description = filters.get('display_description')
     if display_description:
@@ -2269,8 +2286,10 @@ def _process_share_filters(query, filters, project_id=None, is_public=False):
     else:
         display_description = filters.get('display_description~')
         if display_description:
-            query = query.filter(models.Share.display_description.op('LIKE')(
-                u'%' + display_description + u'%'))
+            query = query.filter(
+                models.Share.display_description.op(db_regexp_op)(
+                    _get_filter_value_by_op(
+                        db_regexp_op, display_description, safe_regex_filter)))
 
     export_location_id = filters.pop('export_location_id', None)
     export_location_path = filters.pop('export_location_path', None)
@@ -2311,8 +2330,57 @@ def _process_share_filters(query, filters, project_id=None, is_public=False):
                 constants.STATUS_DEFERRED_DELETING),
             models.ShareInstance.status != (
                 constants.STATUS_ERROR_DEFERRED_DELETING)))
-
     return query
+
+
+def _get_filter_value_by_op(op, filter_value, safe_regex_filter):
+    if op == 'LIKE':
+        return u'%' + filter_value + u'%'
+    else:
+        return safe_regex_filter(filter_value)
+
+
+def _safe_regex_mysql(raw_string):
+    """Make regex safe to mysql.
+
+    Certain items like '|' are interpreted raw by mysql REGEX. If you
+    search for a single | then you trigger an error because it's
+    expecting content on either side.
+
+    For consistency sake we escape all '|'. This does mean we wouldn't
+    support something like foo|bar to match completely different
+    things, however, one can argue putting such complicated regex into
+    name search probably means you are doing this wrong.
+    """
+    return raw_string.replace('|', '\\|')
+
+
+def _get_regexp_ops(connection):
+    """Return safety filter and db opts for regex."""
+    regexp_op_map = {
+        'postgresql': '~',
+        'mysql': 'REGEXP',
+        'sqlite': 'REGEXP'
+    }
+    regex_safe_filters = {
+        'mysql': _safe_regex_mysql
+    }
+    db_type = _db_connection_type(connection)
+
+    return (regex_safe_filters.get(db_type, lambda x: x),
+            regexp_op_map.get(db_type, 'LIKE'))
+
+
+def _db_connection_type(db_connection):
+    """Returns a lowercase symbol for the db type.
+
+    This is useful when we need to change what we are doing per DB
+    (like handling regexes). In a CellsV2 world it probably needs to
+    do something better than use the database configuration string.
+    """
+
+    db_string = db_connection.split(':')[0].split('+')[0]
+    return db_string.lower()
 
 
 def _metadata_refs(metadata_dict, meta_class):
@@ -5424,7 +5492,20 @@ def share_server_create(context, values):
     # updated_at is needed for judgement of automatic cleanup
     server_ref.updated_at = timeutils.utcnow()
     server_ref.update(values)
+
+    # If encryption_key_ref is present, create associated record
+    encryption_key_ref = values.get('encryption_key_ref')
+    if encryption_key_ref:
+        encryption_ref = models.EncryptionRef(
+            id=uuidutils.generate_uuid(),
+            share_server_id=server_ref['id'],
+            encryption_key_ref=encryption_key_ref,
+            project_id=context.project_id,
+        )
+        server_ref.server_encryption_ref_entry = encryption_ref
+
     server_ref.save(session=context.session)
+
     # NOTE(u_glide): Do so to prevent errors with relationships
     return _share_server_get(context, server_ref['id'])
 
@@ -5440,6 +5521,11 @@ def share_server_delete(context, id):
     ).soft_delete()
     _share_server_backend_details_delete(context, id)
     server_ref.soft_delete(session=context.session, update_status=True)
+
+    # If encryption_key_ref is present, delete associated encryption ref entry
+    if server_ref.server_encryption_ref_entry:
+        server_ref.server_encryption_ref_entry.soft_delete(
+            session=context.session)
 
 
 @require_context
@@ -5593,6 +5679,9 @@ def _share_server_get_all_with_filters(context, filters):
     if filters.get('source_share_server_id'):
         query = query.filter_by(
             source_share_server_id=filters.get('source_share_server_id'))
+    if filters.get('encryption_key_ref'):
+        query = query.filter_by(
+            encryption_key_ref=filters.get('encryption_key_ref'))
     if filters.get('share_network_id'):
         query = query.join(
             models.ShareServerShareNetworkSubnetMapping,
@@ -6361,6 +6450,11 @@ def purge_deleted_records(context, age_in_days):
 
     metadata = MetaData()
     metadata.reflect(get_engine())
+    tables = metadata.sorted_tables
+    if not tables:
+        msg = 'No tables found, check database connection'
+        raise exception.InvalidResults(msg)
+
     deleted_age = timeutils.utcnow() - datetime.timedelta(days=age_in_days)
 
     # Deleting rows in share_network_security_service_association
@@ -6375,7 +6469,7 @@ def purge_deleted_records(context, age_in_days):
         with context.session.begin_nested():
             context.session.delete(assoc)
 
-    for table in reversed(metadata.sorted_tables):
+    for table in reversed(tables):
         if 'deleted' not in table.columns.keys():
             continue
 
@@ -6648,6 +6742,15 @@ def _share_replica_data_get_for_project(
 
     result = query.first()
     return result[0] or 0, result[1] or 0
+
+
+@require_context
+def _count_encryption_keys_for_project(
+    context, project_id, user_id=None,
+):
+    return encryption_keys_get_count(
+        context, filters={'project_id': project_id}
+    )
 
 
 @require_context
@@ -7729,3 +7832,43 @@ def resource_lock_get_all(context, filters=None, limit=None, offset=None,
                                  offset=offset)
 
     return query.all(), count
+
+###############################
+
+
+@require_context
+@context_manager.reader
+def encryption_keys_get_count(context, filters=None):
+    if filters:
+        project_id = filters.get('project_id')
+    else:
+        project_id = context.project_id
+
+    query = model_query(
+        context, models.EncryptionRef, read_deleted="no"
+    ).filter_by(
+        project_id=project_id,
+    )
+
+    return query.count()
+
+
+@require_context
+@context_manager.reader
+def encryption_keys_get_all(context, filters=None):
+    if filters:
+        project_id = filters.get('project_id')
+    else:
+        project_id = context.project_id
+
+    query = model_query(
+        context, models.EncryptionRef, read_deleted="no"
+    ).filter_by(
+        project_id=project_id,
+    )
+
+    encryption_key_ref = filters.get('encryption_key_ref')
+    if encryption_key_ref:
+        query = query.filter_by(encryption_key_ref=encryption_key_ref)
+
+    return query.all()

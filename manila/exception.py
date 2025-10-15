@@ -500,6 +500,11 @@ class ShareReplicaSizeExceedsAvailableQuota(QuotaError):
         "gigabytes quota.")
 
 
+class EncryptionKeysLimitExceeded(QuotaError):
+    message = _(
+        "Maximum number of allowed encryption keys is exceeded.")
+
+
 class GlusterfsException(ManilaException):
     message = _("Unknown Gluster exception.")
 
@@ -536,6 +541,10 @@ class UnmanageInvalidShare(InvalidShare):
 
 class PortLimitExceeded(QuotaError):
     message = _("Maximum number of ports exceeded.")
+
+
+class IpAddressGenerationFailureClient(ManilaException):
+    message = _("No free IP addresses available in neutron subnet.")
 
 
 class ShareAccessExists(ManilaException):
@@ -781,6 +790,15 @@ class ShareTypeCreateFailed(ManilaException):
 
 class ShareTypeUpdateFailed(ManilaException):
     message = _("Cannot update share_type %(id)s.")
+
+
+class ManilaBarbicanACLError(ManilaException):
+    message = _("Failed while communicating to Barbican. "
+                "Please check the provided credentials .")
+
+
+class ManilaBarbicanAppCredsError(ManilaException):
+    message = _("Error occured while dealing with barbican for App Creds.")
 
 
 class ShareGroupTypeCreateFailed(ManilaException):

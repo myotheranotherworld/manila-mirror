@@ -208,13 +208,15 @@ REST_API_VERSION_HISTORY = """
     * 2.88 - Added support for update Share access rule.
     * 2.89 - Added support for passing Share network subnet metadata updates
              to driver.
+    * 2.90 - Added encryption key reference option to share create API.
+    * 2.91 - Added support for targeted restores via the share backup API
 """
 
 # The minimum and maximum versions of the API supported
 # The default api version request is defined to be the
 # minimum version of the API supported.
 _MIN_API_VERSION = "2.0"
-_MAX_API_VERSION = "2.89"
+_MAX_API_VERSION = "2.91"
 DEFAULT_API_VERSION = _MIN_API_VERSION
 
 

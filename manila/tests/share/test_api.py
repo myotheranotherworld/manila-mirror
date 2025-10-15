@@ -32,6 +32,7 @@ from manila.data import rpcapi as data_rpc
 from manila import db as db_api
 from manila.db.sqlalchemy import models
 from manila import exception
+from manila.keymgr import barbican as barbican_api
 from manila import policy
 from manila import quota
 from manila import share
@@ -947,6 +948,7 @@ class ShareAPITestCase(test.TestCase):
             az_request_multiple_subnet_support_map=compatible_azs_multiple,
             snapshot_host=None,
             scheduler_hints=None, mount_point_name=None,
+            encryption_key_ref=None,
         )
         db_api.share_get.assert_called_once()
 
@@ -1202,6 +1204,38 @@ class ShareAPITestCase(test.TestCase):
             share_data['display_description']
         )
 
+    @ddt.data(
+        {'overs': {'encryption_keys': 'fake'},
+         'expected_exception': (
+            exception.EncryptionKeysLimitExceeded)
+         })
+    @ddt.unpack
+    def test_create_share_over_encryption_keys_quota(self, overs,
+                                                     expected_exception):
+        share, share_data = self._setup_create_mocks()
+        quota.CONF.set_default("encryption_keys", 2, 'quota')
+        share_data['encryption_key_ref'] = uuidutils.generate_uuid()
+
+        usages = {'encryption_keys': {'reserved': 0, 'in_use': 2}}
+        quotas = {'encryption_keys': 2}
+        exc = exception.OverQuota(overs=overs, usages=usages, quotas=quotas)
+        self.mock_object(quota.QUOTAS, 'reserve', mock.Mock(side_effect=exc))
+        self.mock_object(db_api, 'share_server_get_all_with_filters',
+                         mock.Mock(return_value={}))
+        self.mock_object(barbican_api, 'create_secret_access')
+        self.mock_object(db_api, 'encryption_keys_get_count',
+                         mock.Mock(return_value=2))
+        self.assertRaises(
+            expected_exception,
+            self.api.create,
+            self.context,
+            share_data['share_proto'],
+            share_data['size'],
+            share_data['display_name'],
+            share_data['display_description'],
+            encryption_key_ref=share_data['encryption_key_ref']
+        )
+
     @ddt.data(exception.QuotaError, exception.InvalidShare)
     def test_create_share_error_on_quota_commit(self, expected_exception):
         share, share_data = self._setup_create_mocks()
@@ -1245,6 +1279,7 @@ class ShareAPITestCase(test.TestCase):
                 'share_type_id': 'fake_share_type',
                 'cast_rules_to_readonly': False,
                 'mount_point_name': None,
+                'encryption_key_ref': None
             }
         )
         db_api.share_type_get.assert_called_once_with(
@@ -1279,6 +1314,7 @@ class ShareAPITestCase(test.TestCase):
                 'share_type_id': 'fake_share_type',
                 'cast_rules_to_readonly': False,
                 'mount_point_name': 'fake_mp',
+                'encryption_key_ref': None
             }
         )
 
@@ -1749,7 +1785,6 @@ class ShareAPITestCase(test.TestCase):
             task_state=None)
 
         self.mock_object(db_api, 'share_update', mock.Mock())
-
         self.api.unmanage(self.context, share)
 
         self.share_rpcapi.unmanage_share.assert_called_once_with(
@@ -2659,6 +2694,8 @@ class ShareAPITestCase(test.TestCase):
         )
         share_type = fakes.fake_share_type()
 
+        self.mock_object(db_api, 'share_snapshot_get',
+                         mock.Mock(return_value=snapshot))
         mock_get_share_type_call = self.mock_object(
             share_types, 'get_share_type', mock.Mock(return_value=share_type))
 
@@ -2687,9 +2724,11 @@ class ShareAPITestCase(test.TestCase):
             availability_zones=None,
             az_request_multiple_subnet_support_map=None,
             snapshot_host=snapshot['share']['instance']['host'],
-            scheduler_hints=None, mount_point_name=None)
+            scheduler_hints=None, mount_point_name=None,
+            encryption_key_ref=None)
         share_api.policy.check_policy.assert_called_once_with(
-            self.context, 'share_snapshot', 'get_snapshot')
+            self.context, 'share_snapshot', 'get_snapshot',
+            snapshot, do_raise=False)
         quota.QUOTAS.reserve.assert_called_once_with(
             self.context, share_type_id=share_type['id'],
             gigabytes=1, shares=1)
@@ -2802,7 +2841,8 @@ class ShareAPITestCase(test.TestCase):
             rule = self.api.get_snapshot(self.context, 'fakeid')
             self.assertEqual(fake_get_snap, rule)
             share_api.policy.check_policy.assert_called_once_with(
-                self.context, 'share_snapshot', 'get_snapshot')
+                self.context, 'share_snapshot', 'get_snapshot', rule,
+                do_raise=False)
             db_api.share_snapshot_get.assert_called_once_with(
                 self.context, 'fakeid')
 
@@ -2816,6 +2856,20 @@ class ShareAPITestCase(test.TestCase):
                 policy, 'check_policy', mock.Mock(side_effect=[True, False]))
             self.assertRaises(exception.NotFound, self.api.get_snapshot,
                               self.context, 'fakeid')
+
+    def test_get_snapshot_not_authorized(self):
+        fake_get_snap = {'fake_key': 'fake_val'}
+        share_api.policy.check_policy.return_value = False
+        with mock.patch.object(db_api, 'share_snapshot_get',
+                               mock.Mock(return_value=fake_get_snap)):
+            self.assertRaises(exception.NotFound,
+                              self.api.get_snapshot,
+                              self.context, 'fakeid')
+            share_api.policy.check_policy.assert_called_once_with(
+                self.context, 'share_snapshot', 'get_snapshot',
+                fake_get_snap, do_raise=False)
+            db_api.share_snapshot_get.assert_called_once_with(
+                self.context, 'fakeid')
 
     def test_create_from_snapshot_not_available(self):
         snapshot = db_utils.create_snapshot(

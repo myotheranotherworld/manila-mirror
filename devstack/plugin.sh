@@ -52,6 +52,19 @@ function _clean_zfsonlinux_data {
     done
 }
 
+function _clean_ip_tables {
+    for ipcmd in iptables ip6tables; do
+        # cleanup rules in the "manila-storage" chain
+        sudo $ipcmd -S -v | sed "s/-c [0-9]* [0-9]* //g" | \
+            grep "manila-storage" | grep "\-A" | sed "s/-A/-D/g" | \
+                awk -v ipcmd="$ipcmd" '{print "sudo " ipcmd,$0}' | bash
+        # cleanup the "manila-storage" chain
+        sudo $ipcmd -S -v | sed "s/-c [0-9]* [0-9]* //g" | \
+            grep "manila-storage" | grep "\-N" |  sed "s/-N/-X/g" | \
+                awk -v ipcmd="$ipcmd" '{print "sudo " ipcmd,$0}' | bash
+    done
+}
+
 # cleanup_manila - Remove residual data files, anything left over from previous
 # runs that a clean run would need to clean up
 function cleanup_manila {
@@ -59,26 +72,9 @@ function cleanup_manila {
     _clean_share_group $SHARE_GROUP $SHARE_NAME_PREFIX
     _clean_manila_lvm_backing_file $SHARE_GROUP
     _clean_zfsonlinux_data
+    _clean_ip_tables
 
-    if [ $(trueorfalse False MANILA_USE_UWSGI) == True ]; then
-        remove_uwsgi_config "$MANILA_UWSGI_CONF" "$MANILA_WSGI"
-    fi
-}
-
-# _config_manila_apache_wsgi() - Configure manila-api wsgi application.
-function _config_manila_apache_wsgi {
-    local manila_api_apache_conf
-    local venv_path=""
-    manila_api_apache_conf=$(apache_site_config_for manila-api)
-
-    sudo cp $MANILA_DIR/devstack/apache-manila.template $manila_api_apache_conf
-    sudo sed -e "
-        s|%APACHE_NAME%|$APACHE_NAME|g;
-        s|%MANILA_BIN_DIR%|$MANILA_BIN_DIR|g;
-        s|%PORT%|$REAL_MANILA_SERVICE_PORT|g;
-        s|%APIWORKERS%|$API_WORKERS|g;
-        s|%USER%|$STACK_USER|g;
-    " -i $manila_api_apache_conf
+    remove_uwsgi_config "$MANILA_UWSGI_CONF" "$MANILA_WSGI"
 }
 
 # configure_backends - Configures backends enabled by MANILA_ENABLED_BACKENDS
@@ -280,6 +276,12 @@ function configure_manila {
         echo -"No configured backends, please set a value to MANILA_ENABLED_BACKENDS"
         exit 1
     fi
+    if is_service_enabled barbican; then
+        configure_keystone_authtoken_middleware $MANILA_CONF barbican barbican
+        iniset $MANILA_CONF barbican barbican_endpoint_type $BARBICAN_ENDPOINT_TYPE
+        iniset $MANILA_CONF barbican auth_endpoint $BARBICAN_KEYSTONE_ENDPOINT
+        iniset $MANILA_CONF key_manager backend $KEY_MANAGER_BACKEND
+    fi
 
     configure_backends
     iniset $MANILA_CONF DEFAULT enabled_share_backends $MANILA_ENABLED_BACKENDS
@@ -309,14 +311,8 @@ function configure_manila {
     set_config_opts $MANILA_CONFIGURE_GROUPS
     set_config_opts DEFAULT
     set_backend_availability_zones $MANILA_ENABLED_BACKENDS
+    write_uwsgi_config "$MANILA_UWSGI_CONF" "$MANILA_WSGI" "/share" "" "manila-api"
 
-    if [ $(trueorfalse False MANILA_USE_UWSGI) == True ]; then
-        write_uwsgi_config "$MANILA_UWSGI_CONF" "$MANILA_WSGI" "/share" "" "manila-api"
-    fi
-
-    if [ $(trueorfalse False MANILA_USE_MOD_WSGI) == True ]; then
-        _config_manila_apache_wsgi
-    fi
 
     if [[ "$MANILA_ENFORCE_SCOPE" == True ]] ; then
         iniset $MANILA_CONF oslo_policy enforce_scope true
@@ -362,12 +358,13 @@ function create_service_share_servers {
                 local vm_exists=$( openstack --os-cloud devstack-admin server list --all-projects | grep " $vm_name " )
                 if [[ -z $vm_exists ]]; then
                     private_net_id=$(openstack --os-cloud devstack-admin network show $PRIVATE_NETWORK_NAME -f value -c id)
-                    vm_id=$(openstack --os-cloud devstack-admin server create $vm_name \
+                    vm_id=$(timeout 120 openstack --os-cloud devstack-admin server create $vm_name \
                         --flavor $MANILA_SERVICE_VM_FLAVOR_NAME \
                         --image $MANILA_SERVICE_IMAGE_NAME \
                         --nic net-id=$private_net_id \
                         --security-group $MANILA_SERVICE_SECGROUP \
                         --key-name $MANILA_SERVICE_KEYPAIR_NAME \
+                        --wait \
                         | grep ' id ' | get_field 2)
                 else
                     vm_id=$(openstack --os-cloud devstack-admin server show $vm_name -f value -c id)
@@ -822,56 +819,21 @@ function configure_samba {
 
 # start_manila_api - starts manila API services and checks its availability
 function start_manila_api {
-
-    # NOTE(vkmc) If both options are set to true we are using uwsgi
-    # as the preferred way to deploy manila. See
-    # https://governance.openstack.org/tc/goals/pike/deploy-api-in-wsgi.html#uwsgi-vs-mod-wsgi
-    # for more details
-    if [ $(trueorfalse False MANILA_USE_UWSGI) == True ] && [ $(trueorfalse False MANILA_USE_MOD_WSGI) == True ]; then
-        MSG="Both MANILA_USE_UWSGI and MANILA_USE_MOD_WSGI are set to True.
-            Using UWSGI as the preferred option
-            Set MANILA_USE_UWSGI to False to deploy manila api with MOD_WSGI"
-        warn $LINENO $MSG
-    fi
-
-    if [ $(trueorfalse False MANILA_USE_UWSGI) == True ]; then
-        echo "Deploying with UWSGI"
-        run_process m-api "$(which uwsgi) --ini $MANILA_UWSGI_CONF --procname-prefix manila-api"
-    elif [ $(trueorfalse False MANILA_USE_MOD_WSGI) == True ]; then
-        echo "Deploying with MOD_WSGI"
-        install_apache_wsgi
-        enable_apache_site manila-api
-        restart_apache_server
-        tail_log m-api /var/log/$APACHE_NAME/manila_api.log
-    else
-        echo "Deploying with built-in server"
-        run_process m-api "$MANILA_BIN_DIR/manila-api --config-file $MANILA_CONF"
-    fi
+    echo "Deploying with UWSGI"
+    run_process m-api "$(which uwsgi) --ini $MANILA_UWSGI_CONF --procname-prefix manila-api"
 
     echo "Waiting for Manila API to start..."
-    # This is a health check against the manila-api service we just started.
-    # We use the port ($REAL_MANILA_SERVICE_PORT) here because we want to hit
-    # the bare service endpoint, even if the tls tunnel should be enabled.
-    # We're making sure that the internal port is checked using unencryted
-    # traffic at this point.
 
-    local MANILA_HEALTH_CHECK_URL=$MANILA_SERVICE_PROTOCOL://$MANILA_SERVICE_HOST:$REAL_MANILA_SERVICE_PORT
-
-    if [ $(trueorfalse False MANILA_USE_UWSGI) == True ]; then
-        MANILA_HEALTH_CHECK_URL=$MANILA_ENDPOINT_BASE
-    fi
-
-    if ! wait_for_service $SERVICE_TIMEOUT $MANILA_HEALTH_CHECK_URL; then
+    if ! wait_for_service $SERVICE_TIMEOUT $MANILA_ENDPOINT_BASE; then
         die $LINENO "Manila API did not start"
     fi
 
     # Start proxies if enabled
     #
-    # If tls-proxy is enabled and MANILA_USE_UWSGI is set to True, a generic
-    # http-services-tls-proxy will be set up to handle tls-termination to
-    # manila as well as all the other https services, we don't need to
-    # create our own.
-    if [ $(trueorfalse False MANILA_USE_UWSGI) == False ] && is_service_enabled tls-proxy; then
+    # If tls-proxy is enabled, a generic http-services-tls-proxy will be set up
+    # to handle tls-termination to manila as well as all the other https
+    # services, we don't need to create our own.
+    if is_service_enabled tls-proxy; then
         start_tls_proxy manila '*' $MANILA_SERVICE_PORT $MANILA_SERVICE_HOST $MANILA_SERVICE_PORT_INT
     fi
 }
@@ -892,16 +854,9 @@ function start_manila {
 
 # stop_manila - Stop running processes
 function stop_manila {
-    # Disable manila api service
-    if [ $(trueorfalse False MANILA_USE_MOD_WSGI) == True ]; then
-        disable_apache_site manila-api
-        restart_apache_server
-    else
-        stop_process m-api
-    fi
-
+    local serv
     # Kill all other manila processes
-    for serv in m-sch m-shr m-dat; do
+    for serv in m-api m-sch m-shr m-dat; do
         stop_process $serv
     done
 }

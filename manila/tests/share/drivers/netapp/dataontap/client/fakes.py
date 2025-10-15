@@ -30,9 +30,9 @@ CONNECTION_INFO = {
     'api_trace_pattern': '(.*)',
     'client_api': 'rest',
     'async_rest_timeout': 60,
-    'private_key_file': 'fake_private_key.pem',
-    'certificate_file': 'fake_cert.pem',
-    'ca_certificate_file': 'fake_ca_cert.crt',
+    'private_key_file': '/fake_private_key.pem',
+    'certificate_file': '/fake_cert.pem',
+    'ca_certificate_file': '/fake_ca_cert.crt',
     'certificate_host_validation': False
 }
 
@@ -46,11 +46,18 @@ VERSION = 'NetApp Release 8.2.1 Cluster-Mode: Fri Mar 21 14:25:07 PDT 2014'
 VERSION_NO_DARE = 'NetApp Release 9.1.0: Tue May 10 19:30:23 2016 <1no-DARE>'
 VERSION_TUPLE = (9, 1, 0)
 NODE_NAME = 'fake_node1'
-NODE_NAMES = ('fake_node1', 'fake_node2')
+NODE_NAME2 = 'fake_node2'
+NODE_NAMES = (NODE_NAME, NODE_NAME2)
 VSERVER_NAME = 'fake_vserver'
 VSERVER_NAME_2 = 'fake_vserver_2'
 VSERVER_PEER_NAME = 'fake_vserver_peer'
 VSERVER_PEER_STATE = 'peered'
+FAKE_CONFIG_NAME = "fake_config_name"
+FAKE_CONFIG_UUID = "fake_config_uuid"
+FAKE_KEY_ID = "fake_key_id"
+FAKE_KEYSTONE_URL = "fake_keystone_url"
+FAKE_APPLICATION_CRED_ID = "fake_application_cred_id"
+FAKE_APPLICATION_CRED_SECRET = "fake_application_cred_secret"
 ADMIN_VSERVER_NAME = 'fake_admin_vserver'
 NODE_VSERVER_NAME = 'fake_node_vserver'
 NFS_VERSIONS = ['nfs3', 'nfs4.0']
@@ -117,7 +124,7 @@ USER_NAME = 'fake_user'
 
 PORT = 'e0a'
 VLAN = '1001'
-VLAN_PORT = 'e0a-1001'
+VLAN_PORT = PORT + '-' + VLAN
 IP_ADDRESS = '10.10.10.10'
 NETMASK = '255.255.255.0'
 GATEWAY = '10.10.10.1'
@@ -125,8 +132,8 @@ SUBNET = '10.10.10.0/24'
 NET_ALLOCATION_ID = 'fake_allocation_id'
 LIF_NAME_TEMPLATE = 'os_%(net_allocation_id)s'
 LIF_NAME = LIF_NAME_TEMPLATE % {'net_allocation_id': NET_ALLOCATION_ID}
-IPSPACE_NAME = 'fake_ipspace'
-BROADCAST_DOMAIN = 'fake_domain'
+IPSPACE_NAME = 'ipspace_fake'
+BROADCAST_DOMAIN = 'domain_fake'
 MTU = 9000
 SM_SOURCE_VSERVER = 'fake_source_vserver'
 SM_SOURCE_VOLUME = 'fake_source_volume'
@@ -186,17 +193,22 @@ NETWORK_INTERFACES_MULTIPLE = [
         'vserver': VSERVER_NAME,
         'netmask': NETMASK,
         'role': 'data',
-        'home-node': NODE_NAME,
-        'home-port': PORT,
+        'home-node': NODE_NAME2,
+        'home-port': VLAN_PORT,
     }
 ]
+
+NETWORK_QUALIFIED_PORTS = [NODE_NAME + ':' + VLAN_PORT]
+NETWORK_QUALIFIED_PORTS2 = [NODE_NAME2 + ':' + VLAN_PORT]
+NETWORK_QUALIFIED_PORTS_ALL = (NETWORK_QUALIFIED_PORTS
+                               + NETWORK_QUALIFIED_PORTS2)
 
 IPSPACES = [{
     'uuid': 'fake_uuid',
     'ipspace': IPSPACE_NAME,
     'id': 'fake_id',
-    'broadcast-domains': ['OpenStack'],
-    'ports': [NODE_NAME + ':' + VLAN_PORT],
+    'broadcast-domains': [BROADCAST_DOMAIN],
+    'ports': NETWORK_QUALIFIED_PORTS2,
     'vservers': [
         IPSPACE_NAME,
         VSERVER_NAME,
@@ -874,7 +886,7 @@ NET_IPSPACES_GET_ITER_RESPONSE = etree.XML("""
     <attributes-list>
       <net-ipspaces-info>
         <broadcast-domains>
-          <broadcast-domain-name>OpenStack</broadcast-domain-name>
+          <broadcast-domain-name>%(domain)s</broadcast-domain-name>
         </broadcast-domains>
         <id>fake_id</id>
         <ipspace>%(ipspace)s</ipspace>
@@ -891,8 +903,9 @@ NET_IPSPACES_GET_ITER_RESPONSE = etree.XML("""
     <num-records>1</num-records>
   </results>
 """ % {
+    'domain': BROADCAST_DOMAIN,
     'ipspace': IPSPACE_NAME,
-    'node': NODE_NAME,
+    'node': NODE_NAME2,
     'port': VLAN_PORT,
     'vserver': VSERVER_NAME
 })
@@ -2367,6 +2380,24 @@ VOLUME_GET_ITER_NOT_UNIQUE_RESPONSE = etree.XML("""
     'volume2': SHARE_NAME_2,
 })
 
+VOLUME_GET_ITER_SNAPSHOT_ATTRIBUTES_RESPONSE = etree.XML("""
+  <results status="passed">
+    <attributes-list>
+      <volume-attributes>
+        <volume-snapshot-attributes>
+          <snapshot-policy>%(snapshot_policy)s</snapshot-policy>
+          <snapdir-access-enabled>%(snapdir_access_enabled)s</snapdir-access-enabled>
+        </volume-snapshot-attributes>
+      </volume-attributes>
+    </attributes-list>
+    <num-records>1</num-records>
+  </results>
+""" % {
+    'snapshot_policy': 'daily',
+    'snapdir_access_enabled': 'false',
+})
+
+
 VOLUME_GET_ITER_JUNCTIONED_VOLUMES_RESPONSE = etree.XML("""
   <results status="passed">
     <attributes-list>
@@ -3637,6 +3668,10 @@ VOLUME_ITEM_SIMPLE_RESPONSE_REST = {
         "state": "enabled",
         "compression": "true"
     },
+    "snapshot_directory_access_enabled": "false",
+    "snapshot_policy": {
+        "name": "daily",
+    },
     "state": "online",
 }
 
@@ -3663,6 +3698,21 @@ SVMS_LIST_SIMPLE_RESPONSE_REST = {
         },
     ],
     "num_records": 2,
+}
+
+KEYSTORE_SIMPLE_RESPONSE_REST = {
+    "records": [
+        {
+            "type": "fake_type_barbican",
+            "configuration":
+                {
+                    "name": FAKE_CONFIG_NAME,
+                    "uuid": FAKE_CONFIG_UUID
+                },
+            "uuid": FAKE_CONFIG_UUID
+        }
+    ],
+    "num_records": 1
 }
 
 AGGR_GET_ITER_RESPONSE_REST = {

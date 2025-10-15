@@ -161,6 +161,7 @@ class HostState(object):
         self.share_server_multiple_subnet_support = False
         self.mount_point_name_support = False
         self.share_replicas_migration_support = False
+        self.encryption_support = None
 
         # PoolState for all pools
         self.pools = {}
@@ -370,6 +371,10 @@ class HostState(object):
             pool_cap['share_replicas_migration_support'] = (
                 self.share_replicas_migration_support)
 
+        if 'encryption_support' not in pool_cap:
+            pool_cap['encryption_support'] = (
+                self.encryption_support)
+
         if self.ipv4_support is not None:
             pool_cap['ipv4_support'] = self.ipv4_support
 
@@ -407,6 +412,7 @@ class HostState(object):
             'share_server_multiple_subnet_support', False)
         self.share_replicas_migration_support = capability.get(
             'share_replicas_migration_support', False)
+        self.encryption_support = capability.get('encryption_support', None)
 
     def consume_from_share(self, share):
         """Incrementally update host state from an share."""
@@ -447,6 +453,7 @@ class PoolState(HostState):
         """Estimate provisioned capacity from share sizes on backend."""
         return db.share_instance_sizes_sum_by_host(context, host_name)
 
+    @utils.synchronized("update_from_share_capability")
     def update_from_share_capability(
             self, capability, service=None, context=None):
         """Update information about a pool from its share_node info."""
@@ -507,6 +514,7 @@ class PoolState(HostState):
                 'share_server_multiple_subnet_support', False)
             self.share_replicas_migration_support = capability.get(
                 'share_replicas_migration_support', False)
+            self.encryption_support = capability.get('encryption_support')
 
     def update_pools(self, capability):
         # Do nothing, since we don't have pools within pool, yet

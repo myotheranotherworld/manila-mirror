@@ -35,6 +35,9 @@ from manila import utils
 LOG = log.getLogger(__name__)
 DELETED_PREFIX = 'deleted_manila_'
 DEFAULT_IPSPACE = 'Default'
+CLUSTER_IPSPACES = ('Cluster', DEFAULT_IPSPACE)
+DEFAULT_BROADCAST_DOMAIN = 'Default'
+BROADCAST_DOMAIN_PREFIX = 'domain_'
 DEFAULT_MAX_PAGE_LENGTH = 10000
 CIFS_USER_GROUP_TYPE = 'windows'
 SNAPSHOT_CLONE_OWNER = 'volume_clone'
@@ -862,6 +865,25 @@ class NetAppRestClient(object):
         return result['records'][0]['nas']['path']
 
     @na_utils.trace
+    def get_volume_snapshot_attributes(self, volume_name):
+        """Returns snapshot attributes"""
+        volume = self._get_volume_by_args(vol_name=volume_name)
+        vol_uuid = volume['uuid']
+        query = {
+            'fields': 'snapshot_directory_access_enabled,snapshot_policy.name'
+        }
+
+        result = self.send_request(
+            f'/storage/volumes/{vol_uuid}', 'get', query=query)
+
+        snap_attributes = {}
+        snap_attributes['snapshot-policy'] = result.get(
+            'snapshot_policy', '').get('name')
+        snap_attributes['snapdir-access-enabled'] = result.get(
+            'snapshot_directory_access_enabled', 'false')
+        return snap_attributes
+
+    @na_utils.trace
     def get_volume(self, volume_name):
         """Returns the volume with the specified name, if present."""
         query = {
@@ -1233,17 +1255,60 @@ class NetAppRestClient(object):
             self.send_request(f'/storage/volumes/{uuid}', 'patch', body=body)
 
     @na_utils.trace
-    def set_volume_max_files(self, volume_name, max_files):
+    def set_volume_max_files(self, volume_name, max_files,
+                             retry_allocated=False):
         """Set share file limit."""
 
-        volume = self._get_volume_by_args(vol_name=volume_name)
-        uuid = volume['uuid']
+        try:
+            volume = self._get_volume_by_args(vol_name=volume_name)
+            uuid = volume['uuid']
 
-        body = {
-            'files.maximum': int(max_files)
-        }
+            body = {
+                'files.maximum': int(max_files)
+            }
 
-        self.send_request(f'/storage/volumes/{uuid}', 'patch', body=body)
+            self.send_request(f'/storage/volumes/{uuid}', 'patch', body=body)
+        except netapp_api.api.NaApiError as e:
+            if e.code != netapp_api.EREST_CANNOT_MODITY_SPECIFIED_FIELD:
+                return
+            if retry_allocated:
+                alloc_files = self.get_volume_allocated_files(volume_name)
+                new_max_files = alloc_files['used']
+                # no need to act if current max files are set to
+                # allocated files
+                if new_max_files == alloc_files['maximum']:
+                    return
+                msg = _('Set higher max files %(new_max_files)s '
+                        'on %(vol)s. The current allocated inodes '
+                        'are larger than requested %(max_files)s.')
+                msg_args = {'vol': volume_name,
+                            'max_files': max_files,
+                            'new_max_files': new_max_files}
+                LOG.info(msg, msg_args)
+                self.set_volume_max_files(volume_name, new_max_files,
+                                          retry_allocated=False)
+            else:
+                raise exception.NetAppException(message=e.message)
+
+    @na_utils.trace
+    def get_volume_allocated_files(self, volume_name):
+        """Get share allocated files."""
+
+        try:
+            volume = self._get_volume_by_args(vol_name=volume_name)
+            uuid = volume['uuid']
+
+            query = {
+                'fields': 'files.maximum,files.used'
+            }
+            response = self.send_request(f'/storage/volumes/{uuid}', 'get',
+                                         query=query)
+            if self._has_records(response):
+                return response['records'][0]['files']
+        except netapp_api.api.NaApiError:
+            msg = _('Failed to get volume allocated files for %s.')
+            LOG.error(msg, volume_name)
+            return {'maximum': 0, 'used': 0}
 
     @na_utils.trace
     def set_volume_snapdir_access(self, volume_name, hide_snapdir):
@@ -3257,6 +3322,7 @@ class NetAppRestClient(object):
                             parent_snapshot_name=None,
                             qos_policy_group=None,
                             adaptive_qos_policy_group=None,
+                            mount_point_name=None,
                             **options):
         """Create volume clone in the same aggregate as parent volume."""
 
@@ -3264,7 +3330,7 @@ class NetAppRestClient(object):
             'name': volume_name,
             'clone.parent_volume.name': parent_volume_name,
             'clone.parent_snapshot.name': parent_snapshot_name,
-            'nas.path': '/%s' % volume_name,
+            'nas.path': '/%s' % (mount_point_name or volume_name),
             'clone.is_flexclone': 'true',
             'svm.name': self.connection.get_vserver(),
         }
@@ -3886,9 +3952,11 @@ class NetAppRestClient(object):
         self._create_ldap_client(security_service, vserver_name=vserver_name)
 
     @na_utils.trace
-    def configure_active_directory(self, security_service, vserver_name):
+    def configure_active_directory(self, security_service,
+                                   vserver_name, aes_encryption):
         """Configures AD on Vserver."""
         self.configure_dns(security_service, vserver_name=vserver_name)
+        self.configure_cifs_aes_encryption(vserver_name, aes_encryption)
         self.set_preferred_dc(security_service, vserver_name)
 
         cifs_server = self._get_cifs_server_name(vserver_name)
@@ -3993,7 +4061,7 @@ class NetAppRestClient(object):
 
     @na_utils.trace
     def setup_security_services(self, security_services, vserver_client,
-                                vserver_name, timeout=30):
+                                vserver_name, aes_encryption, timeout=30):
         """Setup SVM security services."""
         body = {
             'nsswitch.namemap': ['ldap', 'files'],
@@ -4014,7 +4082,8 @@ class NetAppRestClient(object):
 
             elif security_service['type'].lower() == 'active_directory':
                 vserver_client.configure_active_directory(security_service,
-                                                          vserver_name)
+                                                          vserver_name,
+                                                          aes_encryption)
                 vserver_client.configure_cifs_options(security_service)
 
             elif security_service['type'].lower() == 'kerberos':
@@ -4247,6 +4316,22 @@ class NetAppRestClient(object):
                 self.set_preferred_dc(new_security_service, svm_uuid)
 
     @na_utils.trace
+    def configure_cifs_aes_encryption(self, vserver_name, aes_encryption):
+        try:
+            svm_uuid = self._get_unique_svm_by_name(vserver_name)
+            body = {
+                'security.advertised_kdc_encryptions': (
+                    ['aes-128', 'aes-256'] if aes_encryption else
+                    ['des', 'rc4']),
+            }
+
+            self.send_request(
+                f'/protocols/cifs/services/{svm_uuid}', 'patch', body=body)
+        except netapp_api.api.NaApiError as e:
+            msg = _("Failed to set aes encryption. %s")
+            raise exception.NetAppException(msg % e.message)
+
+    @na_utils.trace
     def set_preferred_dc(self, security_service, vserver_name):
         """Set preferred domain controller."""
 
@@ -4353,7 +4438,8 @@ class NetAppRestClient(object):
     @na_utils.trace
     def create_vserver(self, vserver_name, root_volume_aggregate_name,
                        root_volume_name, aggregate_names, ipspace_name,
-                       security_cert_expire_days, delete_retention_hours):
+                       security_cert_expire_days, delete_retention_hours,
+                       logical_space_reporting):
         """Creates new vserver and assigns aggregates."""
 
         # NOTE(nahimsouza): root_volume_aggregate_name and root_volume_name
@@ -4361,7 +4447,8 @@ class NetAppRestClient(object):
         # the vserver creation by REST API
         self._create_vserver(
             vserver_name, aggregate_names, ipspace_name,
-            delete_retention_hours, name_server_switch=['files'])
+            delete_retention_hours, name_server_switch=['files'],
+            logical_space_reporting=logical_space_reporting)
         self._modify_security_cert(vserver_name, security_cert_expire_days)
 
     @na_utils.trace
@@ -4375,7 +4462,8 @@ class NetAppRestClient(object):
     @na_utils.trace
     def _create_vserver(self, vserver_name, aggregate_names, ipspace_name,
                         delete_retention_hours,
-                        name_server_switch=None, subtype=None):
+                        name_server_switch=None, subtype=None,
+                        logical_space_reporting=False):
         """Creates new vserver and assigns aggregates."""
         body = {
             'name': vserver_name,
@@ -4394,6 +4482,11 @@ class NetAppRestClient(object):
         for aggr_name in aggregate_names:
             body['aggregates'].append({'name': aggr_name})
 
+        body['is_space_reporting_logical'] = (
+            'true' if logical_space_reporting else 'false')
+        body['is_space_enforcement_logical'] = (
+            'true' if logical_space_reporting else 'false')
+
         self.send_request('/svm/svms', 'post', body=body)
 
         if delete_retention_hours != 0:
@@ -4407,6 +4500,55 @@ class NetAppRestClient(object):
             except netapp_api.api.NaApiError:
                 LOG.warning('Failed to modify retention period for vserver '
                             '%(server)s.', {'server': vserver_name})
+
+    @na_utils.trace
+    def create_barbican_kms_config_for_specified_vserver(self, vserver_name,
+                                                         config_name, key_id,
+                                                         keystone_url,
+                                                         app_cred_id,
+                                                         app_cred_secret):
+        """Creates a Barbican KMS configuration for the specified vserver."""
+
+        body = {
+            'svm.name': vserver_name,
+            'configuration.name': config_name,
+            'key_id': key_id,
+            'keystone_url': keystone_url,
+            'application_cred_id': app_cred_id,
+            'application_cred_secret': app_cred_secret,
+        }
+
+        self.send_request('/security/barbican-kms', 'post', body=body)
+
+    @na_utils.trace
+    def get_key_store_config_uuid(self, config_name):
+        """Retrieves keystore configuration uuid for the specified config name.
+
+        """
+
+        query = {
+            'configuration.name': config_name
+        }
+
+        response = self.send_request('/security/key-stores',
+                                     'get', query=query)
+
+        if not response.get('records'):
+            return None
+
+        return response.get('records')[0]['configuration']['uuid']
+
+    @na_utils.trace
+    def enable_key_store_config(self, config_uuid):
+        """Enables a keystore configuration"""
+
+        body = {
+            "enabled": True
+        }
+
+        # Update key-store
+        self.send_request(f'/security/key-stores/{config_uuid}', 'patch',
+                          body=body)
 
     @na_utils.trace
     def _modify_security_cert(self, vserver_name, security_cert_expire_days):
@@ -5281,6 +5423,44 @@ class NetAppRestClient(object):
                 raise exception.NetAppException(msg % msg_args)
 
     @na_utils.trace
+    def get_degraded_ports(self, broadcast_domains, ipspace_name):
+        """Get degraded ports for broadcast domains and an ipspace."""
+
+        valid_domains = self._get_valid_broadcast_domains(broadcast_domains)
+
+        query = {
+            'broadcast_domain.name': '|'.join(valid_domains),
+            'broadcast_domain.ipspace.name': ipspace_name,
+            'state': 'degraded',
+            'type': 'vlan',
+            'fields': 'node.name,name'
+        }
+
+        result = self.send_request('/network/ethernet/ports', 'get',
+                                   query=query)
+
+        net_port_info_list = result.get('records', [])
+
+        ports = []
+        for port_info in net_port_info_list:
+            ports.append(f"{port_info['node']['name']}:"
+                         f"{port_info['name']}")
+
+        return ports
+
+    @na_utils.trace
+    def _get_valid_broadcast_domains(_self, broadcast_domains):
+        valid_domains = []
+        for broadcast_domain in broadcast_domains:
+            if (
+                broadcast_domain == 'OpenStack'
+                or broadcast_domain == DEFAULT_BROADCAST_DOMAIN
+                or broadcast_domain.startswith(BROADCAST_DOMAIN_PREFIX)
+            ):
+                valid_domains.append(broadcast_domain)
+        return valid_domains
+
+    @na_utils.trace
     def svm_migration_start(
             self, source_cluster_name, source_share_server_name,
             dest_aggregates, dest_ipspace=None, check_only=False):
@@ -5414,7 +5594,7 @@ class NetAppRestClient(object):
                           query=query)
 
     @na_utils.trace
-    def get_ipspaces(self, ipspace_name=None):
+    def get_ipspaces(self, ipspace_name=None, vserver_name=None):
         """Gets one or more IPSpaces."""
 
         query = {
@@ -5498,14 +5678,45 @@ class NetAppRestClient(object):
 
     @na_utils.trace
     def delete_ipspace(self, ipspace_name):
-        """Deletes an IPspace and its ports/domains."""
+        """Deletes an IPspace
 
-        self._delete_port_and_broadcast_domains_for_ipspace(ipspace_name)
+        Returns:
+            True if ipspace was deleted,
+            False if validation or error prevented deletion
+        """
+        if not self.features.IPSPACES:
+            return False
+
+        if not ipspace_name:
+            return False
+
+        if (
+            ipspace_name in CLUSTER_IPSPACES
+            or self.ipspace_has_data_vservers(ipspace_name)
+        ):
+            LOG.debug('IPspace %(ipspace)s not deleted: still in use.',
+                      {'ipspace': ipspace_name})
+            return False
+
+        try:
+            self._delete_port_and_broadcast_domains_for_ipspace(ipspace_name)
+        except netapp_api.NaApiError as e:
+            msg = _('Broadcast Domains of IPspace %s not deleted. '
+                    'Reason: %s') % (ipspace_name, e)
+            LOG.warning(msg)
+            return False
 
         query = {
             'name': ipspace_name
         }
-        self.send_request('/network/ipspaces', 'delete', query=query)
+        try:
+            self.send_request('/network/ipspaces', 'delete', query=query)
+        except netapp_api.NaApiError as e:
+            msg = _('IPspace %s not deleted. Reason: %s') % (ipspace_name, e)
+            LOG.warning(msg)
+            return False
+
+        return True
 
     @na_utils.trace
     def get_svm_volumes_total_size(self, svm_name):

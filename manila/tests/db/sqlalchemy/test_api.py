@@ -897,6 +897,28 @@ class ShareDatabaseAPITestCase(test.TestCase):
 
         self.assertEqual(len(share_values), len(results))
 
+    @ddt.data(
+        ('display_name~', 'display_name',
+         ['fake_name_1', 'fake_name_2', 'fake_name_%'], '%'),
+        ('display_description~', 'display_description',
+         ['fake desc 1', 'fake desc 2', 'fake desc %'], '%')
+    )
+    @ddt.unpack
+    def test_share_get_all_like_filters_with_percent_sign(
+            self, filter_name, key, share_values, like_value):
+        for value in share_values:
+            kwargs = {key: value}
+            db_utils.create_share(**kwargs)
+        db_utils.create_share(
+            display_name='irrelevant_name',
+            display_description='should not be queried')
+
+        filters = {filter_name: like_value}
+
+        results = db_api.share_get_all(self.ctxt, filters=filters)
+
+        self.assertEqual(1, len(results))
+
     @ddt.data(None, 'writable')
     def test_share_get_has_replicas_field(self, replication_type):
         share = db_utils.create_share(replication_type=replication_type)
@@ -4059,6 +4081,13 @@ class ShareServerDatabaseAPITestCase(test.TestCase):
 
         for ss in share_servers:
             self.assertEqual(constants.STATUS_NETWORK_CHANGE, ss['status'])
+
+    def test_encryption_keys_get_count(self):
+        servers = [db_utils.create_share_server(
+                   encryption_key_ref=uuidutils.generate_uuid())
+                   for __ in range(1, 4)]
+        count = db_api.encryption_keys_get_count(context.get_admin_context())
+        self.assertEqual(count, len(servers))
 
 
 class ServiceDatabaseAPITestCase(test.TestCase):

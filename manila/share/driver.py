@@ -290,9 +290,13 @@ class ShareDriver(object):
         # Indicates whether a driver supports adding subnet with its
         # allocations to an in-use share network availability zone. This
         # property will be saved in every new share server.
+        self.restore_to_target_support = False
+        # Indicates whether a driver supports out of place restores
+        # to a share other then the source of a given backup.
         self.network_allocation_update_support = False
         self.dhss_mandatory_security_service_association = {}
         self.share_replicas_migration_support = False
+        self.encryption_support = None
 
         self.pools = []
         if self.configuration:
@@ -970,7 +974,8 @@ class ShareDriver(object):
 
     def choose_share_server_compatible_with_share(self, context, share_servers,
                                                   share, snapshot=None,
-                                                  share_group=None):
+                                                  share_group=None,
+                                                  encryption_key_ref=None):
         """Method that allows driver to choose share server for provided share.
 
         If compatible share-server is not found, method should return None.
@@ -980,6 +985,7 @@ class ShareDriver(object):
         :param share:  share model
         :param snapshot: snapshot model
         :param share_group: ShareGroup model with shares
+        :param encryption_key_ref: Encryption key reference
         :returns: share-server or None
         """
         # If creating in a share group, use its share server
@@ -1362,6 +1368,7 @@ class ShareDriver(object):
             mount_point_name_support=False,
             share_replicas_migration_support=(
                 self.share_replicas_migration_support),
+            encryption_support=self.encryption_support,
         )
         if isinstance(data, dict):
             common.update(data)

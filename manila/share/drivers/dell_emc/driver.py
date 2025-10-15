@@ -42,7 +42,7 @@ EMC_NAS_OPTS = [
                 help='Use secure connection to server.'),
     cfg.StrOpt('emc_share_backend',
                ignore_case=True,
-               choices=['isilon', 'vnx', 'unity', 'powermax',
+               choices=['powerscale', 'isilon', 'vnx', 'unity', 'powermax',
                         'powerstore', 'powerflex'],
                help='Share backend.'),
     cfg.StrOpt('emc_nas_root_dir',
@@ -81,6 +81,11 @@ class EMCShareDriver(driver.ShareDriver):
         if self.backend_name == 'vnx':
             LOG.warning('Dell EMC VNX share driver has been deprecated and is '
                         'expected to be removed in a future release.')
+        if self.backend_name == 'isilon':
+            self.backend_name = 'powerscale'
+            LOG.warning('Dell EMC isilon share driver has been deprecated and '
+                        'is renamed to powerscale. It is expected '
+                        'to be removed in a future release.')
         self.plugin = self.plugin_manager.load_plugin(
             self.backend_name,
             configuration=self.configuration)
@@ -293,3 +298,15 @@ class EMCShareDriver(driver.ShareDriver):
         if hasattr(self.plugin, 'get_default_filter_function'):
             return self.plugin.get_default_filter_function()
         return None
+
+    def get_backend_info(self, context):
+        """Get driver and array configuration parameters."""
+        if hasattr(self.plugin, 'get_backend_info'):
+            return self.plugin.get_backend_info(context)
+        raise NotImplementedError()
+
+    def ensure_shares(self, context, shares):
+        """Invoked to ensure that shares are exported."""
+        if hasattr(self.plugin, 'ensure_shares'):
+            return self.plugin.ensure_shares(context, shares)
+        raise NotImplementedError()

@@ -26,6 +26,7 @@ from oslo_log import log
 from oslo_serialization import jsonutils
 from oslo_utils import excutils
 from oslo_utils import units
+from oslo_utils import uuidutils
 
 from manila.common import constants
 from manila import exception
@@ -46,7 +47,6 @@ LOG = log.getLogger(__name__)
 SUPPORTED_NETWORK_TYPES = (None, 'flat', 'vlan')
 SEGMENTED_NETWORK_TYPES = ('vlan',)
 DEFAULT_MTU = 1500
-CLUSTER_IPSPACES = ('Cluster', 'Default')
 SERVER_MIGRATE_SVM_DR = 'svm_dr'
 SERVER_MIGRATE_SVM_MIGRATE = 'svm_migrate'
 METADATA_VLAN = 'set_vlan'
@@ -236,8 +236,11 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
                 e.detail_data = {'server_details': server_details}
                 raise
 
-            return server_details
+            if metadata.get('encryption_key_ref'):
+                self._create_barbican_kms_config_for_specified_vserver(
+                    vserver_name, metadata)
 
+            return server_details
         return setup_server_with_lock()
 
     @na_utils.trace
@@ -327,7 +330,13 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
         # earlier step to make sure all subnets have the same segmentation_id.
         vlan = network_info[0]['segmentation_id']
         ipspace_name = self._client.get_ipspace_name_for_vlan_port(
-            node_name, port, vlan) or self._create_ipspace(network_info[0])
+            node_name, port, vlan)
+
+        if (
+            ipspace_name is None
+            or ipspace_name in client_cmode.CLUSTER_IPSPACES
+        ):
+            ipspace_name = self._create_ipspace(network_info[0])
 
         aggregate_names = self._find_matching_aggregates()
         if is_dp_destination:
@@ -338,7 +347,8 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
                 vserver_name,
                 aggregate_names,
                 ipspace_name,
-                self.configuration.netapp_delete_retention_hours)
+                self.configuration.netapp_delete_retention_hours,
+                self.configuration.netapp_enable_logical_space_reporting)
             # Set up port and broadcast domain for the current ipspace
             self._create_port_and_broadcast_domain(
                 ipspace_name, network_info[0])
@@ -353,7 +363,8 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
                 aggr_set,
                 ipspace_name,
                 self.configuration.netapp_security_cert_expire_days,
-                self.configuration.netapp_delete_retention_hours)
+                self.configuration.netapp_delete_retention_hours,
+                self.configuration.netapp_enable_logical_space_reporting)
 
             vserver_client = self._get_api_client(vserver=vserver_name)
 
@@ -370,6 +381,45 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
                     self._delete_vserver(vserver_name,
                                          security_services=security_services,
                                          needs_lock=False)
+
+    @na_utils.trace
+    def _create_barbican_kms_config_for_specified_vserver(self, vserver_name,
+                                                          metadata):
+        """Creates a Barbican KMS configuration for the specified vserver."""
+
+        key_href = metadata.get('encryption_key_ref')
+        config_name = "barbican_config_" + uuidutils.generate_uuid()
+        keystone_auth_url = metadata.get('keystone_url')
+        keystone_auth_token_path = self.configuration.safe_get(
+            'netapp_identity_auth_token_path')
+        keystone_url = keystone_auth_url + keystone_auth_token_path
+        app_cred_id = metadata.get('application_credential_id')
+        app_cred_secret = metadata.get('application_credential_secret')
+        backend_name = share_utils.extract_host(metadata.get('request_host'),
+                                                level='backend_name')
+        try:
+            rest_client = data_motion.get_client_for_backend(
+                backend_name, vserver_name=None, force_rest_client=True)
+        except exception.NetAppException:
+            LOG.error("Failed to get REST client for backend %s. "
+                      "Please ensure that REST is enabled in the cluster.",
+                      backend_name)
+            raise
+
+        LOG.debug('Creating a Barbican KMS configuration for the vserver '
+                  '%(vserver)s', {'vserver': vserver_name})
+        rest_client.create_barbican_kms_config_for_specified_vserver(
+            vserver_name, config_name,
+            key_href, keystone_url,
+            app_cred_id, app_cred_secret)
+
+        LOG.debug('Getting the key store configuration uuid for the config '
+                  '%(config)s', {'config': config_name})
+        config_uuid = rest_client.get_key_store_config_uuid(config_name)
+
+        LOG.debug('Enabling the key store configuration the config %(config)s',
+                  {'config': config_name})
+        rest_client.enable_key_store_config(config_uuid)
 
     def _setup_network_for_vserver(self, vserver_name, vserver_client,
                                    network_info, ipspace_name,
@@ -413,13 +463,15 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
                 nfs_config=nfs_config)
 
         if security_services:
-            self._client.setup_security_services(security_services,
-                                                 vserver_client,
-                                                 vserver_name)
+            self._client.setup_security_services(
+                security_services,
+                vserver_client,
+                vserver_name,
+                self.configuration.netapp_cifs_aes_encryption)
 
     def _get_valid_ipspace_name(self, network_id):
         """Get IPspace name according to network id."""
-        return 'ipspace_' + network_id.replace('-', '_')
+        return client_cmode.IPSPACE_PREFIX + network_id.replace('-', '_')
 
     @na_utils.trace
     def _create_ipspace(self, network_info, client=None):
@@ -610,7 +662,12 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
                         needs_lock=True):
         """Delete a Vserver plus IPspace and security services as needed."""
 
-        ipspace_name = self._client.get_vserver_ipspace(vserver)
+        ipspace_name = None
+
+        ipspaces = self._client.get_ipspaces(vserver_name=vserver)
+        if ipspaces:
+            ipspace = ipspaces[0]
+            ipspace_name = ipspace['ipspace']
 
         vserver_client = self._get_api_client(vserver=vserver)
         network_interfaces = vserver_client.get_network_interfaces()
@@ -649,17 +706,31 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
             self._client.delete_vserver(vserver,
                                         vserver_client,
                                         security_services=security_services)
-            ipspace_deleted = False
-            if (ipspace_name and ipspace_name not in CLUSTER_IPSPACES
-                    and not self._client.ipspace_has_data_vservers(
-                        ipspace_name)):
-                self._client.delete_ipspace(ipspace_name)
-                ipspace_deleted = True
 
-            if not ipspace_name or ipspace_deleted:
-                # NOTE(dviroel): only delete vlans if they are not being used
-                # by any ipspaces and data vservers.
-                self._delete_vserver_vlans(interfaces_on_vlans)
+            if ipspace_name is None:
+                return
+
+            ipspace_deleted = self._client.delete_ipspace(ipspace_name)
+
+            ports = set()
+            if ipspace_deleted:
+                # we don't want to leave any ports behind, clean them all up
+                ports.update(ipspace['ports'])
+            # NOTE(dviroel): only delete vlans if they are not being used
+            # by any ipspaces and data vservers.
+            else:
+                broadcast_domains = ipspace['broadcast-domains']
+                # NOTE(carthaca): filter for degraded ports, those where
+                # reachability is down (e.g. because neutron port is gone)
+                ports.update(self._client.get_degraded_ports(broadcast_domains,
+                                                             ipspace_name))
+                # make sure to delete ports of the vserver we are currently
+                # deleting (may not be marked degraded, yet)
+                for interface in interfaces_on_vlans:
+                    port = f"{interface['home-node']}:{interface['home-port']}"
+                    ports.add(port)
+
+            self._delete_port_vlans(self._client, ports)
 
         @utils.synchronized('netapp-VLAN-%s' % vlan_id, external=True)
         def _delete_vserver_with_lock():
@@ -670,15 +741,16 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
         else:
             return _delete_vserver_without_lock()
 
-    @na_utils.trace
-    def _delete_vserver_vlans(self, network_interfaces_on_vlans):
-        """Delete Vserver's VLAN configuration from ports"""
-        for interface in network_interfaces_on_vlans:
+    def _delete_port_vlans(_self, client, ports):
+        """Delete Port's VLAN configuration
+
+        must be called with a cluster client
+        """
+        for port_name in ports:
             try:
-                home_port = interface['home-port']
-                port, vlan = home_port.split('-')
-                node = interface['home-node']
-                self._client.delete_vlan(node, port, vlan)
+                node, port = port_name.split(':')
+                port, vlan = port.split('-')
+                client.delete_vlan(node, port, vlan)
             except exception.NetAppException:
                 LOG.exception("Deleting Vserver VLAN failed.")
 
@@ -915,16 +987,17 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
 
     def choose_share_server_compatible_with_share(self, context, share_servers,
                                                   share, snapshot=None,
-                                                  share_group=None):
+                                                  share_group=None,
+                                                  encryption_key_ref=None):
         """Method that allows driver to choose share server for provided share.
 
         If compatible share-server is not found, method should return None.
-
         :param context: Current context
         :param share_servers: list with share-server models
         :param share:  share model
         :param snapshot: snapshot model
         :param share_group: ShareGroup model with shares
+        :param encryption_key_ref: Encryption key reference
         :returns: share-server or None
         """
         if not share_servers:
@@ -933,10 +1006,12 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
 
         nfs_config = None
         extra_specs = share_types.get_extra_specs_from_share(share)
+
         if self.is_nfs_config_supported:
             nfs_config = self._get_nfs_config_provisioning_options(extra_specs)
 
         provisioning_options = self._get_provisioning_options(extra_specs)
+
         # Get FPolicy extra specs to avoid incompatible share servers
         fpolicy_ext_to_include = provisioning_options.get(
             'fpolicy_extensions_to_include')
@@ -952,7 +1027,8 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
                     share_group=share_group,
                     fpolicy_ext_include=fpolicy_ext_to_include,
                     fpolicy_ext_exclude=fpolicy_ext_to_exclude,
-                    fpolicy_file_operations=fpolicy_file_operations):
+                    fpolicy_file_operations=fpolicy_file_operations,
+                    encryption_key_ref=encryption_key_ref):
                 return share_server
 
         #  There is no compatible share server to be reused
@@ -962,8 +1038,20 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
     def _check_reuse_share_server(self, share_server, nfs_config, share=None,
                                   share_group=None, fpolicy_ext_include=None,
                                   fpolicy_ext_exclude=None,
-                                  fpolicy_file_operations=None):
+                                  fpolicy_file_operations=None,
+                                  encryption_key_ref=None):
         """Check whether the share_server can be reused or not."""
+
+        LOG.debug('Checking if the encryption key ref passed is already '
+                  'configured for the existing share_servers')
+        if (encryption_key_ref and encryption_key_ref !=
+           share_server['encryption_key_ref']):
+            msg = _('The available share server %(server_id)s is already'
+                    'configured with a different encryption-key-ref',
+                    {'server_id': share_server['id']})
+            LOG.warning(msg)
+            return False
+
         if (share_group and share_group.get('share_server_id') !=
                 share_server['id']):
             return False
@@ -1254,13 +1342,17 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
             destination_ipspace, network_info)
 
         def _cleanup_ipspace(ipspace):
-            try:
-                dest_client.delete_ipspace(ipspace)
-            except Exception:
+            if not dest_client.delete_ipspace(ipspace):
                 LOG.info(
                     'Did not delete ipspace used to check the compatibility '
                     'for SVM Migrate. It is possible that it was reused and '
                     'there are other entities consuming it.')
+
+            if vlan:
+                port = None
+                for node in dest_client.list_cluster_nodes():
+                    port = port or self._get_node_data_port(node)
+                    dest_client.delete_vlan(node, port, vlan)
 
         # 1. Sends the request to the backend.
         try:
@@ -1851,6 +1943,7 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
             source_share_server['host'], level='backend_name')
         src_vserver, src_client = self._get_vserver(
             share_server=source_share_server, backend_name=src_backend_name)
+        src_ipspace_name = src_client.get_vserver_ipspace(src_vserver)
         dest_backend_name = share_utils.extract_host(
             dest_share_server['host'], level='backend_name')
 
@@ -1894,6 +1987,29 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
                 for allocation in dest_share_server['network_allocations']:
                     ports[allocation['id']] = allocation['ip_address']
                 server_backend_details['ports'] = jsonutils.dumps(ports)
+
+            # Delete ipspace on source cluster when possible
+            src_cluster_client = data_motion.get_client_for_host(
+                source_share_server['host'])
+
+            def _delete_ipspace_and_vlan():
+                src_ipspace = src_cluster_client.get_ipspaces(
+                    src_ipspace_name)[0]
+                ports = src_ipspace['ports']
+                broadcast_domains = src_ipspace['broadcast-domains']
+                ipspace_deleted = src_cluster_client.delete_ipspace(
+                    src_ipspace_name)
+                if not ipspace_deleted:
+                    ports = src_cluster_client.get_degraded_ports(
+                        broadcast_domains, src_ipspace_name)
+                self._delete_port_vlans(src_cluster_client, ports)
+
+            try:
+                _delete_ipspace_and_vlan()
+            except Exception as e:
+                msg = _('Could not delete ipspace %s on SVM migration '
+                        'source. Reason: %s') % (src_ipspace_name, e)
+                LOG.warning(msg)
         else:
             self._share_server_migration_complete_svm_dr(
                 source_share_server, dest_share_server, src_vserver,
@@ -2050,11 +2166,18 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
             msg = _("Failed to cancel the share server migration.")
             raise exception.NetAppException(message=msg)
 
-        # If there is need to, remove the ipspace.
-        if (dest_ipspace_name and dest_ipspace_name not in CLUSTER_IPSPACES
-                and not dest_client.ipspace_has_data_vservers(
-                    dest_ipspace_name)):
-            dest_client.delete_ipspace(dest_ipspace_name)
+        # TODO(chuan) Wait until the ipspace is not being used by vserver
+        # anymore, which is not deleted immediately after migration
+        # cancelled.
+        dest_client.delete_ipspace(dest_ipspace_name)
+        network_info = dest_share_server.get('network_allocations')
+        vlan = network_info[0]['segmentation_id'] if network_info else None
+        if vlan:
+            port = None
+            for node in dest_client.list_cluster_nodes():
+                port = port or self._get_node_data_port(node)
+                dest_client.delete_vlan(node, port, vlan)
+
         return
 
     @na_utils.trace
@@ -2146,6 +2269,13 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
                     "'driver_handles_share_server' == True mode.")
             raise exception.NetAppException(msg)
 
+        if (self.configuration.netapp_enable_logical_space_reporting and
+                not provisioning_options.get('thin_provisioned')):
+            msg = _("Logical space reporting is only available if thin "
+                    "provisioning is enabled. Set 'thin_provisioning=True' "
+                    "in your provisioning options")
+            raise exception.NetAppException(msg)
+
         (super(NetAppCmodeMultiSVMFileStorageLibrary, self)
          .validate_provisioning_options_for_share(provisioning_options,
                                                   extra_specs=extra_specs,
@@ -2223,9 +2353,11 @@ class NetAppCmodeMultiSVMFileStorageLibrary(
             raise exception.NetAppException(msg)
 
         if current_security_service is None:
-            self._client.setup_security_services([new_security_service],
-                                                 vserver_client,
-                                                 vserver_name)
+            self._client.setup_security_services(
+                [new_security_service],
+                vserver_client,
+                vserver_name,
+                self.configuration.netapp_cifs_aes_encryption)
             LOG.info("A new security service configuration was added to share "
                      "server '%(share_server_id)s'",
                      {'share_server_id': share_server['id']})

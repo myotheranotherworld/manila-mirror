@@ -129,9 +129,9 @@ CLIENT_KWARGS = {
     'transport_type': 'https',
     'ssl_cert_path': '/etc/ssl/certs/',
     'password': 'pass',
-    'private_key_file': 'fake_private_key.pem',
-    'certificate_file': 'fake_certificate.pem',
-    'ca_certificate_file': 'fake_ca_certificate.crt',
+    'private_key_file': '/fake_private_key.pem',
+    'certificate_file': '/fake_certificate.pem',
+    'ca_certificate_file': '/fake_ca_certificate.crt',
     'certificate_host_validation': False,
     'port': '443',
     'api_trace_pattern': '(.*)',
@@ -211,7 +211,24 @@ SHARE_INSTANCE = {
     'share_network_id': '5dfe0898-e2a1-4740-9177-81c7d26713b0',
     'share_server_id': '7e6a2cc8-871f-4b1d-8364-5aad0f98da86',
     'replica_state': constants.REPLICA_STATE_ACTIVE,
+    'status': constants.STATUS_AVAILABLE
+}
+
+SHARE_INSTANCE_WITH_ENCRYPTION = {
+    'id': SHARE_INSTANCE_ID,
+    'share_id': SHARE_ID,
+    'host': MANILA_HOST_NAME,
+    'project_id': TENANT_ID,
+    'mount_point_name': MOUNT_POINT_NAME,
+    'name': SHARE_INSTANCE_NAME,
+    'size': SHARE_SIZE,
+    'share_proto': 'fake',
+    'share_type_id': SHARE_TYPE_ID,
+    'share_network_id': '5dfe0898-e2a1-4740-9177-81c7d26713b0',
+    'share_server_id': '7e6a2cc8-871f-4b1d-8364-5aad0f98da86',
+    'replica_state': constants.REPLICA_STATE_ACTIVE,
     'status': constants.STATUS_AVAILABLE,
+    'encryption_key_ref': 'fake_key_ref'
 }
 
 FLEXVOL_TO_MANAGE = {
@@ -416,6 +433,7 @@ PROVISIONING_OPTIONS_STRING = {
     'snapshot_policy': 'default',
     'language': 'en-US',
     'max_files': 5000,
+    'max_files_multiplier': 4.2,
     'adaptive_qos_policy_group': None,
     'fpolicy_extensions_to_exclude': None,
     'fpolicy_extensions_to_include': None,
@@ -432,6 +450,7 @@ PROVISIONING_OPTIONS_STRING_MISSING_SPECS = {
     'snapshot_policy': 'default',
     'language': 'en-US',
     'max_files': None,
+    'max_files_multiplier': None,
     'adaptive_qos_policy_group': None,
     'fpolicy_extensions_to_exclude': None,
     'fpolicy_extensions_to_include': None,
@@ -448,6 +467,7 @@ PROVISIONING_OPTIONS_STRING_DEFAULT = {
     'snapshot_policy': None,
     'language': None,
     'max_files': None,
+    'max_files_multiplier': None,
     'adaptive_qos_policy_group': None,
     'fpolicy_extensions_to_exclude': None,
     'fpolicy_extensions_to_include': None,
@@ -468,6 +488,7 @@ STRING_EXTRA_SPEC = {
     'netapp:snapshot_policy': 'default',
     'netapp:language': 'en-US',
     'netapp:max_files': 5000,
+    'netapp:max_files_multiplier': 4.2,
     'netapp:adaptive_qos_policy_group': None,
     'netapp:efficiency_policy': None,
 }
@@ -1089,6 +1110,7 @@ POOLS = [
         'netapp_cluster_name': 'fake_cluster_name',
         'netapp_snaplock_type': 'compliance',
         'share_replicas_migration_support': True,
+        'encryption_support': ['share_server'],
     },
     {
         'pool_name': AGGREGATES[1],
@@ -1119,7 +1141,8 @@ POOLS = [
         'netapp_flexgroup': False,
         'netapp_cluster_name': 'fake_cluster_name',
         'netapp_snaplock_type': 'compliance',
-        'share_replicas_migration_support': True
+        'share_replicas_migration_support': True,
+        'encryption_support': ['share_server'],
     },
 ]
 
@@ -1150,7 +1173,8 @@ POOLS_VSERVER_CREDS = [
         'security_service_update_support': True,
         'share_server_multiple_subnet_support': True,
         'netapp_flexgroup': False,
-        'share_replicas_migration_support': True
+        'share_replicas_migration_support': True,
+        'encryption_support': ['share_server'],
     },
     {
         'pool_name': AGGREGATES[1],
@@ -1174,7 +1198,8 @@ POOLS_VSERVER_CREDS = [
         'security_service_update_support': True,
         'share_server_multiple_subnet_support': True,
         'netapp_flexgroup': False,
-        'share_replicas_migration_support': True
+        'share_replicas_migration_support': True,
+        'encryption_support': ['share_server'],
     },
 ]
 
@@ -1625,6 +1650,16 @@ PROCESSOR_INSTANCE_NAMES = ['processor0', 'processor1']
 SERVER_METADATA = {
     'share_type_id': 'fake_id',
     'host': 'fake_host',
+}
+
+SERVER_METADATA_WITH_ENCRYPTION = {
+    'share_type_id': 'fake_id',
+    'host': 'fake_host',
+    'encryption_key_ref': 'fake_key',
+    'keystone_url': 'fake_keystone_url',
+    'application_credential_id': 'fake_app_cred_id',
+    'application_credential_secret': 'fake_app_cred_secret',
+    'request_host': 'fake_host@pool'
 }
 
 PROCESSOR_COUNTERS = [

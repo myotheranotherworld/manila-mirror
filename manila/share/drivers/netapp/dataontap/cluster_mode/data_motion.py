@@ -42,21 +42,19 @@ CONF = cfg.CONF
 
 
 def get_backend_configuration(backend_name):
-    config_stanzas = CONF.list_all_sections()
-    if backend_name not in config_stanzas:
+    config = configuration.Configuration(driver.share_opts,
+                                         config_group=backend_name)
+
+    if config.driver_handles_share_servers is None:
         msg = _("Could not find backend stanza %(backend_name)s in "
                 "configuration which is required for replication or migration "
-                "workflows with the source backend. Available stanzas are "
-                "%(stanzas)s")
+                "workflows with the source backend.")
         params = {
-            "stanzas": config_stanzas,
             "backend_name": backend_name,
         }
         raise exception.BadConfigurationException(reason=msg % params)
 
-    config = configuration.Configuration(driver.share_opts,
-                                         config_group=backend_name)
-    if config.driver_handles_share_servers:
+    if config.driver_handles_share_servers is True:
         # NOTE(dviroel): avoid using a pre-create vserver on DHSS == True mode
         # when retrieving remote backend configuration.
         config.netapp_vserver = None
@@ -92,9 +90,10 @@ def get_backup_configuration(backup_type):
     return config
 
 
-def get_client_for_backend(backend_name, vserver_name=None):
+def get_client_for_backend(backend_name, vserver_name=None,
+                           force_rest_client=False):
     config = get_backend_configuration(backend_name)
-    if config.netapp_use_legacy_client:
+    if config.netapp_use_legacy_client and not force_rest_client:
         client = client_cmode.NetAppCmodeClient(
             transport_type=config.netapp_transport_type,
             ssl_cert_path=config.netapp_ssl_cert_path,
