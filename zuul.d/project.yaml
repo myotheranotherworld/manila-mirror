@@ -20,12 +20,11 @@
         - manila-tempest-plugin-dummy-dhss-legacy
         - manila-tempest-plugin-container:
             voting: false
-        - manila-tempest-plugin-lvm-fips:
+        - manila-tempest-plugin-lvm-fips-py311:
             voting: false
-        # (TODO) gouthamr: unskip this grenade job when trunk is 2025.1 since
-        # this is different from the job below only during SLURP releases
-        # - manila-grenade
-        - manila-grenade-skip-level-always
+        - manila-grenade
+        - manila-grenade-skip-level-always:
+            voting: false
         - manila-rally-no-ss:
             voting: false
         - manila-rally-ss:
@@ -60,6 +59,7 @@
       - ^api-ref/.*$
       - ^doc/.*$
       - ^manila/tests/.*$
+      - ^\.pre-commit-config\.yaml$
       - ^releasenotes/.*$
       - ^setup.cfg$
       - ^tools/.*$

@@ -570,6 +570,11 @@ def share_access_create(context, values):
     return IMPL.share_access_create(context, values)
 
 
+def share_access_update(context, access_id, values):
+    """Update access to share."""
+    return IMPL.share_access_update(context, access_id, values)
+
+
 def share_access_get(context, access_id):
     """Get share access rule."""
     return IMPL.share_access_get(context, access_id)
@@ -1297,12 +1302,12 @@ def share_server_get_all_by_host_and_share_subnet_valid(
     )
 
 
-def share_server_get_all_by_host_and_share_subnet(
-    context, host, share_subnet_id,
+def share_server_get_all_by_host_and_or_share_subnet(
+    context, host=None, share_subnet_id=None,
 ):
-    """Get share server DB records by host and share net."""
-    return IMPL.share_server_get_all_by_host_and_share_subnet(
-        context, host, share_subnet_id,
+    """Get share server DB records by host and/or share net."""
+    return IMPL.share_server_get_all_by_host_and_or_share_subnet(
+        context, host=host, share_subnet_id=share_subnet_id,
     )
 
 
@@ -1892,3 +1897,15 @@ def resource_lock_get(context, lock_id):
 def resource_lock_get_all(context, **kwargs):
     """Retrieve all resource locks."""
     return IMPL.resource_lock_get_all(context, **kwargs)
+
+##################
+
+
+def encryption_keys_get_count(context, filters=None):
+    """Get count of encryption keys."""
+    return IMPL.encryption_keys_get_count(context, filters=filters)
+
+
+def encryption_keys_get_all(context, filters=None):
+    """Get all encryption keys."""
+    return IMPL.encryption_keys_get_all(context, filters=filters)

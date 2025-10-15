@@ -114,6 +114,8 @@
      - (List) The affinity keys are default to ensure backwards compatibility. Update the list with metadata items that should only be manipulated by people allowed by the "update_admin_only_metadata" policy.
    * - ``driver_updatable_metadata`` = ``None``
      - (List) Metadata keys that will decide which share metadata can be passed to share drivers as part of metadata create/update operations.
+   * - ``driver_updatable_subnet_metadata`` = ``None``
+     - (List) Metadata keys that will decide which share network_subnet_metadata can be passed to share drivers as part of metadata create/update operations.
    * - **[coordination]**
      -
    * - ``backend_url`` = ``file://$state_path``
@@ -130,3 +132,5 @@
      - (List) Check the presence of a file based on a port to determine if an application is running on a port. Expects a "port:path" list of strings. Used by DisableByFilesPortsHealthcheck plugin.
    * - ``path`` = ``/healthcheck``
      - (String) DEPRECATED: The path to respond to healtcheck requests on.
+   * - ``update_shares_status_on_ensure`` = ``True``
+     - (Boolean) Defines whether Manila should update the status of the shares when ensuring shares or not.

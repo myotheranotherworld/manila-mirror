@@ -78,6 +78,12 @@ class FakeConnection(base.StorageConnection):
     def teardown_server(self, server_details, security_services=None):
         """Teardown share server."""
 
+    def get_backend_info(self, context):
+        """Get driver and array configuration parameters."""
+
+    def ensure_shares(self, context, shares):
+        """Invoked to ensure that shares are exported."""
+
 
 class FakeConnection_powermax(FakeConnection):
     def __init__(self, *args, **kwargs):
@@ -176,6 +182,8 @@ class EMCShareFrameworkTestCase(test.TestCase):
         data['security_service_update_support'] = False
         data['share_server_multiple_subnet_support'] = False
         data['network_allocation_update_support'] = False
+        data['share_replicas_migration_support'] = False
+        data['encryption_support'] = None
         self.assertEqual(data, self.driver._stats)
 
     def _fake_safe_get(self, value):
@@ -227,10 +235,13 @@ class EMCShareFrameworkTestCase(test.TestCase):
         self.driver.delete_share(context, share, share_server)
         self.driver.delete_snapshot(context, snapshot, share_server)
         self.driver.ensure_share(context, share, share_server)
+        self.driver.get_backend_info(context)
+        self.driver.ensure_shares(context, [share])
         access = mock.Mock()
         self.driver.allow_access(context, share, access, share_server)
         self.driver.deny_access(context, share, access, share_server)
-        self.driver.update_access(context, share, None, None, share_server)
+        self.driver.update_access(context, share, None, None,
+                                  None, share_server)
         self.driver.check_for_setup_error()
         self.driver.get_network_allocations_number()
         self.driver._teardown_server(None)

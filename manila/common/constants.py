@@ -62,8 +62,10 @@ SHARE_ACCESS_RESOURCE_TYPE = 'access_rule'
 # Access rule states
 ACCESS_STATE_QUEUED_TO_APPLY = 'queued_to_apply'
 ACCESS_STATE_QUEUED_TO_DENY = 'queued_to_deny'
+ACCESS_STATE_QUEUED_TO_UPDATE = 'queued_to_update'
 ACCESS_STATE_APPLYING = 'applying'
 ACCESS_STATE_DENYING = 'denying'
+ACCESS_STATE_UPDATING = 'updating'
 ACCESS_STATE_ACTIVE = 'active'
 ACCESS_STATE_ERROR = 'error'
 ACCESS_STATE_DELETED = 'deleted'
@@ -92,8 +94,10 @@ STATUS_NETWORK_CHANGE = 'network_change'
 ACCESS_RULES_STATES = (
     ACCESS_STATE_QUEUED_TO_APPLY,
     ACCESS_STATE_QUEUED_TO_DENY,
+    ACCESS_STATE_QUEUED_TO_UPDATE,
     ACCESS_STATE_APPLYING,
     ACCESS_STATE_DENYING,
+    ACCESS_STATE_UPDATING,
     ACCESS_STATE_ACTIVE,
     ACCESS_STATE_ERROR,
     ACCESS_STATE_DELETED,
@@ -151,6 +155,8 @@ TRANSITIONAL_STATUSES = (
 INVALID_SHARE_INSTANCE_STATUSES_FOR_ACCESS_RULE_UPDATES = (
     TRANSITIONAL_STATUSES
 )
+
+SUPPORTED_ENCRYPTION_TYPES = ['share', 'share_server']
 
 SUPPORTED_SHARE_PROTOCOLS = (
     'NFS', 'CIFS', 'GLUSTERFS', 'HDFS', 'CEPHFS', 'MAPRFS')
@@ -309,6 +315,7 @@ class ExtraSpecs(object):
     MOUNT_SNAPSHOT_SUPPORT = "mount_snapshot_support"
     MOUNT_POINT_NAME_SUPPORT = "mount_point_name_support"
     AVAILABILITY_ZONES = "availability_zones"
+    ENCRYPTION_SUPPORT = "encryption_support"
     PROVISIONING_MAX_SHARE_SIZE = "provisioning:max_share_size"
     PROVISIONING_MIN_SHARE_SIZE = "provisioning:min_share_size"
     PROVISIONING_MAX_SHARE_EXTEND_SIZE = "provisioning:max_share_extend_size"
@@ -327,6 +334,7 @@ class ExtraSpecs(object):
         MOUNT_SNAPSHOT_SUPPORT,
         MOUNT_POINT_NAME_SUPPORT,
         AVAILABILITY_ZONES,
+        ENCRYPTION_SUPPORT,
         PROVISIONING_MAX_SHARE_SIZE,
         PROVISIONING_MIN_SHARE_SIZE,
         PROVISIONING_MAX_SHARE_EXTEND_SIZE,
@@ -357,6 +365,8 @@ class ExtraSpecs(object):
     }
 
     REPLICATION_TYPES = ('writable', 'readable', 'dr')
+
+    ENCRYPTION_TYPES = ('share', 'share_server')
 
 
 class AdminOnlyMetadata(object):

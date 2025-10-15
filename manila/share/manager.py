@@ -26,6 +26,7 @@ import hashlib
 import json
 from operator import xor
 
+from keystoneauth1 import loading as ks_loading
 from oslo_config import cfg
 from oslo_log import log
 from oslo_serialization import jsonutils
@@ -40,6 +41,7 @@ from manila import coordination
 from manila.data import rpcapi as data_rpcapi
 from manila import exception
 from manila.i18n import _
+from manila.keymgr import barbican as barbican_api
 from manila import manager
 from manila.message import api as message_api
 from manila.message import message_field
@@ -87,7 +89,7 @@ share_manager_opts = [
     cfg.IntOpt('unused_share_server_cleanup_interval',
                default=10,
                help='Unallocated share servers reclamation time interval '
-                    '(minutes). Minimum value is 10 minutes, maximum is 60 '
+                    '(minutes). Minimum value is 10 minutes, maximum is 720 '
                     'minutes. The reclamation function is run every '
                     '10 minutes and delete share servers which were unused '
                     'more than unused_share_server_cleanup_interval option '
@@ -95,7 +97,7 @@ share_manager_opts = [
                     'will wait for a share server to go unutilized before '
                     'deleting it.',
                min=10,
-               max=60),
+               max=720),
     cfg.IntOpt('replica_state_update_interval',
                default=300,
                help='This value, specified in seconds, determines how often '
@@ -167,10 +169,21 @@ share_manager_opts = [
                     'snapshots in backend driver.'),
 ]
 
+
+ks_opts = [
+    cfg.StrOpt('auth_url',
+               help='Keystone authentication URL.'),
+]
+
 CONF = cfg.CONF
 CONF.register_opts(share_manager_opts)
 CONF.import_opt('periodic_hooks_interval', 'manila.share.hook')
 CONF.import_opt('periodic_interval', 'manila.service')
+
+KEYSTONE_AUTHTOKEN_GROUP = 'keystone_authtoken'
+CONF.register_opts(ks_opts, KEYSTONE_AUTHTOKEN_GROUP)
+ks_loading.register_auth_conf_options(CONF, KEYSTONE_AUTHTOKEN_GROUP)
+keystone_url = getattr(CONF.keystone_authtoken, 'auth_url')
 
 # Drivers that need to change module paths or class names can add their
 # old/new path here to maintain backward compatibility.
@@ -272,7 +285,7 @@ def add_hooks(f):
 class ShareManager(manager.SchedulerDependentManager):
     """Manages NAS storages."""
 
-    RPC_API_VERSION = '1.29'
+    RPC_API_VERSION = '1.30'
 
     def __init__(self, share_driver=None, service_name=None, *args, **kwargs):
         """Load the driver from args, or from flags."""
@@ -788,6 +801,8 @@ class ShareManager(manager.SchedulerDependentManager):
                         context, available_share_servers,
                         share_instance=share_instance))
 
+            encryption_key_ref = share_instance.get('encryption_key_ref')
+
             compatible_share_server = None
             if available_share_servers:
                 try:
@@ -795,7 +810,8 @@ class ShareManager(manager.SchedulerDependentManager):
                         self.driver.choose_share_server_compatible_with_share(
                             context, available_share_servers, share_instance,
                             snapshot=snapshot.instance if snapshot else None,
-                            share_group=share_group
+                            share_group=share_group,
+                            encryption_key_ref=encryption_key_ref,
                         )
                     )
                 except Exception as e:
@@ -803,7 +819,38 @@ class ShareManager(manager.SchedulerDependentManager):
                         error("Cannot choose compatible share server: %s",
                               e)
 
+            share_server_should_be_encrypted = (
+                (encryption_key_ref and self.driver.encryption_support) and
+                ("share_server" in self.driver.encryption_support))
+
+            app_cred = None
             if not compatible_share_server:
+                if share_server_should_be_encrypted:
+                    # Create secret_ref ACL for Barbican User
+                    try:
+                        barbican_api.create_secret_access(context,
+                                                          encryption_key_ref)
+                        LOG.debug('Created Barbican ACL for encryption key '
+                                  'reference %s.', encryption_key_ref)
+                    except Exception as e:
+                        self._delete_encryption_keys_quota(context)
+                        with excutils.save_and_reraise_exception():
+                            error("Cannot create ACL for Barbican user %s", e)
+
+                    # Create application credentials for barbican user
+                    try:
+                        app_cred = (
+                            barbican_api.create_application_credentials(
+                                context, encryption_key_ref).to_dict())
+                        LOG.debug("Created app cred id %s", app_cred['id'])
+                    except Exception as e:
+                        self._delete_encryption_keys_quota(context)
+                        barbican_api.delete_secret_access(context,
+                                                          encryption_key_ref)
+                        with excutils.save_and_reraise_exception():
+                            error("Cannot create application credential: "
+                                  "%s", e)
+
                 compatible_share_server = self.db.share_server_create(
                     context,
                     {
@@ -814,8 +861,27 @@ class ShareManager(manager.SchedulerDependentManager):
                             self.driver.security_service_update_support),
                         'network_allocation_update_support': (
                             self.driver.network_allocation_update_support),
+                        'share_replicas_migration_support': (
+                            self.driver.share_replicas_migration_support),
+                        'encryption_key_ref': (
+                            encryption_key_ref if
+                            share_server_should_be_encrypted else None),
+                        'application_credential_id': (
+                            app_cred['id'] if app_cred else None),
                     }
                 )
+            else:
+                if share_server_should_be_encrypted:
+                    # Get application credentials for barbican user
+                    try:
+                        app_cred = barbican_api.get_application_credentials(
+                            context,
+                            compatible_share_server.get(
+                                'application_credential_id')).to_dict()
+                        LOG.debug('Got app cred id %s', app_cred['id'])
+                    except Exception as e:
+                        with excutils.save_and_reraise_exception():
+                            error("Cannot get application credential: %s", e)
 
             msg = ("Using share_server %(share_server)s for share instance"
                    " %(share_instance_id)s")
@@ -830,9 +896,15 @@ class ShareManager(manager.SchedulerDependentManager):
                 {'share_server_id': compatible_share_server['id']},
                 with_share_data=True
             )
+
             if create_on_backend:
                 metadata = self._build_server_metadata(
-                    share_instance['host'], share_instance['share_type_id'])
+                    context,
+                    share_instance['host'],
+                    share_instance['share_type_id'],
+                    app_cred=app_cred,
+                    encryption_key_ref=encryption_key_ref
+                )
                 compatible_share_server = (
                     self._create_share_server_in_backend(
                         context, compatible_share_server, metadata))
@@ -841,11 +913,29 @@ class ShareManager(manager.SchedulerDependentManager):
 
         return _wrapped_provide_share_server_for_share()
 
-    def _build_server_metadata(self, host, share_type_id):
-        return {
+    def _build_server_metadata(self, context, host, share_type_id,
+                               app_cred=None,
+                               encryption_key_ref=None):
+
+        encryption_key_href = None
+        if encryption_key_ref:
+            encryption_key_href = barbican_api.get_secret_href(
+                context, encryption_key_ref)
+            LOG.debug("Generated encryption_key_href %s for backend share "
+                      "server.", encryption_key_href)
+
+        metadata = {
             'request_host': host,
             'share_type_id': share_type_id,
+            'encryption_key_ref': encryption_key_href,
+            'keystone_url': keystone_url,
         }
+        if app_cred:
+            metadata.update({
+                'application_credential_id': app_cred.get('id'),
+                'application_credential_secret': encryption_key_ref,
+            })
+        return metadata
 
     def _provide_share_server_for_migration(self, context,
                                             source_share_server,
@@ -904,6 +994,8 @@ class ShareManager(manager.SchedulerDependentManager):
                         self.driver.security_service_update_support),
                     'network_allocation_update_support': (
                         self.driver.network_allocation_update_support),
+                    'share_replicas_migration_support': (
+                        self.driver.share_replicas_migration_support),
                 }
             )
 
@@ -962,7 +1054,7 @@ class ShareManager(manager.SchedulerDependentManager):
         share_server = self.db.share_server_get(context, share_server_id)
         share = self.db.share_instance_get(
             context, share_instance_id, with_share_data=True)
-        metadata = self._build_server_metadata(share['host'],
+        metadata = self._build_server_metadata(context, share['host'],
                                                share['share_type_id'])
 
         self._create_share_server_in_backend(context, share_server, metadata)
@@ -1091,6 +1183,8 @@ class ShareManager(manager.SchedulerDependentManager):
                             self.driver.security_service_update_support),
                         'network_allocation_update_support': (
                             self.driver.network_allocation_update_support),
+                        'share_replicas_migration_support': (
+                            self.driver.share_replicas_migration_support),
                     }
                 )
 
@@ -1110,6 +1204,7 @@ class ShareManager(manager.SchedulerDependentManager):
             if compatible_share_server['status'] == constants.STATUS_CREATING:
                 # Create share server on backend with data from db.
                 metadata = self._build_server_metadata(
+                    context,
                     share_group_ref['host'],
                     share_group_ref['share_types'][0]['share_type_id'])
                 compatible_share_server = self._setup_server(
@@ -2150,6 +2245,22 @@ class ShareManager(manager.SchedulerDependentManager):
                         resource_id=share_id,
                         detail=(message_field.Detail
                                 .SECURITY_SERVICE_FAILED_AUTH))
+            except exception.IpAddressGenerationFailureClient:
+                with excutils.save_and_reraise_exception():
+                    error = ("Creation of share instance %s failed: "
+                             "No Free IP's in neutron subnet.")
+                    LOG.error(error, share_instance_id)
+                    self.db.share_instance_update(
+                        context, share_instance_id,
+                        {'status': constants.STATUS_ERROR}
+                    )
+                    self.message_api.create(
+                        context,
+                        message_field.Action.CREATE,
+                        share['project_id'],
+                        resource_type=message_field.Resource.SHARE,
+                        resource_id=share_id,
+                        detail=message_field.Detail.NEUTRON_SUBNET_FULL)
             except Exception:
                 with excutils.save_and_reraise_exception():
                     error = ("Creation of share instance %s failed: "
@@ -2784,8 +2895,10 @@ class ShareManager(manager.SchedulerDependentManager):
     @utils.require_driver_initialized
     def periodic_share_replica_update(self, context):
         LOG.debug("Updating status of share replica instances.")
+        # we will need: id, host, replica_state, share_id
         replicas = self.db.share_replicas_get_all(context,
-                                                  with_share_data=True)
+                                                  with_share_data=False,
+                                                  with_share_server=False)
 
         # Filter only non-active replicas belonging to this backend
         def qualified_replica(r):
@@ -2796,24 +2909,24 @@ class ShareManager(manager.SchedulerDependentManager):
         replicas = list(filter(lambda x: qualified_replica(x), replicas))
         for replica in replicas:
             self._share_replica_update(
-                context, replica, share_id=replica['share_id'])
+                context, replica['id'], share_id=replica['share_id'])
 
     @add_hooks
     @utils.require_driver_initialized
     def update_share_replica(self, context, share_replica_id, share_id=None):
         """Initiated by the force_update API."""
-        share_replica = self.db.share_replica_get(
-            context, share_replica_id, with_share_data=True,
-            with_share_server=True)
-        self._share_replica_update(context, share_replica, share_id=share_id)
+        self._share_replica_update(
+            context, share_replica_id, share_id=share_id)
 
     @locked_share_replica_operation
-    def _share_replica_update(self, context, share_replica, share_id=None):
-        # Re-grab the replica:
+    def _share_replica_update(self, context, share_replica_id, share_id=None):
+        # share_id is used by the locked_share_replica_operation decorator
+        # Grab the replica:
         try:
+            # _get_share_instance_dict will fetch share server
             share_replica = self.db.share_replica_get(
-                context, share_replica['id'], with_share_data=True,
-                with_share_server=True)
+                context, share_replica_id, with_share_data=True,
+                with_share_server=False)
         except exception.ShareReplicaNotFound:
             # Replica may have been deleted, nothing to do here
             return
@@ -2834,10 +2947,11 @@ class ShareManager(manager.SchedulerDependentManager):
         LOG.debug("Updating status of share share_replica %s: ",
                   share_replica['id'])
 
+        # _get_share_instance_dict will fetch share server
         replica_list = (
             self.db.share_replicas_get_all_by_share(
                 context, share_replica['share_id'],
-                with_share_data=True, with_share_server=True)
+                with_share_data=True, with_share_server=False)
         )
 
         _active_replica = next((x for x in replica_list
@@ -2859,7 +2973,7 @@ class ShareManager(manager.SchedulerDependentManager):
 
         # Get snapshots for the share.
         share_snapshots = self.db.share_snapshot_get_all_for_share(
-            context, share_id)
+            context, share_replica['share_id'])
 
         # Get the required data for snapshots that have 'aggregate_status'
         # set to 'available'.
@@ -3392,7 +3506,9 @@ class ShareManager(manager.SchedulerDependentManager):
                 {'status': constants.STATUS_ACTIVE,
                  'identifier': new_identifier,
                  'network_allocation_update_support': (
-                     self.driver.network_allocation_update_support)})
+                     self.driver.network_allocation_update_support),
+                 'share_replicas_migration_support': (
+                     self.driver.share_replicas_migration_support)})
 
         except Exception:
             msg = "Error managing share server %s"
@@ -4310,8 +4426,10 @@ class ShareManager(manager.SchedulerDependentManager):
         LOG.debug("Updating status of share replica snapshots.")
         transitional_statuses = (constants.STATUS_CREATING,
                                  constants.STATUS_DELETING)
+        # we will need: id, host, replica_state
         replicas = self.db.share_replicas_get_all(context,
-                                                  with_share_data=True)
+                                                  with_share_data=False,
+                                                  with_share_server=False)
 
         def qualified_replica(r):
             # Filter non-active replicas belonging to this backend
@@ -4330,6 +4448,8 @@ class ShareManager(manager.SchedulerDependentManager):
                 'share_instance_ids': replica['id'],
                 'statuses': transitional_statuses,
             }
+            # we will need: id, snapshot_id, share_instance_id and
+            # share['share_id']
             replica_snapshots = (
                 self.db.share_snapshot_instance_get_all_with_filters(
                     context, filters, with_share_data=True)
@@ -4340,7 +4460,8 @@ class ShareManager(manager.SchedulerDependentManager):
             replica_snapshots = (
                 self.db.share_snapshot_instance_get_all_with_filters(
                     context,
-                    {'snapshot_ids': replica_snapshot['snapshot_id']})
+                    {'snapshot_ids': replica_snapshot['snapshot_id']},
+                    with_share_data=False)
             )
             share_id = replica_snapshot['share']['share_id']
             self._update_replica_snapshot(
@@ -4350,11 +4471,13 @@ class ShareManager(manager.SchedulerDependentManager):
     @locked_share_replica_operation
     def _update_replica_snapshot(self, context, replica_snapshot,
                                  replica_snapshots=None, share_id=None):
-        # Re-grab the replica:
+        # share_id is used by the locked_share_replica_operation decorator
+        # Re-grab the replica, now with share data:
         try:
+            # _get_share_instance_dict will fetch share server
             share_replica = self.db.share_replica_get(
                 context, replica_snapshot['share_instance_id'],
-                with_share_data=True, with_share_server=True)
+                with_share_data=True, with_share_server=False)
             replica_snapshot = self.db.share_snapshot_instance_get(
                 context, replica_snapshot['id'], with_share_data=True)
         except exception.NotFound:
@@ -4377,10 +4500,11 @@ class ShareManager(manager.SchedulerDependentManager):
                   "on replica: %(replica)s", msg_payload)
 
         # Grab all the replica and snapshot information.
+        # _get_share_instance_dict will fetch share server
         replica_list = (
             self.db.share_replicas_get_all_by_share(
                 context, share_replica['share_id'],
-                with_share_data=True, with_share_server=True)
+                with_share_data=True, with_share_server=False)
         )
 
         replica_list = [self._get_share_instance_dict(context, r)
@@ -4432,7 +4556,7 @@ class ShareManager(manager.SchedulerDependentManager):
     @add_hooks
     @utils.require_driver_initialized
     def update_access(self, context, share_instance_id):
-        """Allow/Deny access to some share."""
+        """Allow/Deny/Update access to some share."""
         share_instance = self._get_share_instance(context, share_instance_id)
         share_server_id = share_instance.get('share_server_id')
 
@@ -4692,7 +4816,7 @@ class ShareManager(manager.SchedulerDependentManager):
             # has been changed.
             server_id = share_server['id']
             try:
-                self.db.share_server_get(
+                server = self.db.share_server_get(
                     context, server_id)
             except exception.ShareServerNotFound:
                 raise
@@ -4724,6 +4848,21 @@ class ShareManager(manager.SchedulerDependentManager):
                                                share_net,
                                                share_net_subnet)
 
+                application_credential_id = server.get(
+                    'application_credential_id')
+                if application_credential_id:
+                    # Delete application credentials for barbican user
+                    try:
+                        barbican_api.delete_application_credentials(
+                            context, application_credential_id)
+                    except Exception:
+                        LOG.warning('Application credentials not found '
+                                    'during deletion of share server.')
+
+                    encryption_key_ref = server.get('encryption_key_ref')
+                    barbican_api.delete_secret_access(context,
+                                                      encryption_key_ref)
+
                 LOG.debug("Deleting share server '%s'", server_id)
                 security_services = []
                 for ss_name in constants.SECURITY_SERVICES_ALLOWED_TYPES:
@@ -4742,12 +4881,31 @@ class ShareManager(manager.SchedulerDependentManager):
                     self.db.share_server_update(
                         context, server_id, {'status': constants.STATUS_ERROR})
             else:
+                encryption_key_ref = server.get('encryption_key_ref')
+                if encryption_key_ref:
+                    self._delete_encryption_keys_quota(context)
                 self.db.share_server_delete(context, share_server['id'])
 
         _wrapped_delete_share_server()
         LOG.info(
             "Share server '%s' has been deleted successfully.",
             share_server['id'])
+
+    def _delete_encryption_keys_quota(self, context):
+        reservations = None
+        try:
+            reservations = QUOTAS.reserve(
+                context, project_id=context.project_id,
+                encryption_keys=-1,
+            )
+        except Exception:
+            LOG.exception("Failed to update encryption_keys quota "
+                          "usages while deleting share server.")
+
+        if reservations:
+            QUOTAS.commit(
+                context, reservations, project_id=context.project_id,
+            )
 
     @add_hooks
     @utils.require_driver_initialized
@@ -5486,10 +5644,30 @@ class ShareManager(manager.SchedulerDependentManager):
                  {'backup_id': backup['id'], 'share_id': share_id})
 
         backup_id = backup['id']
+        backup_share_id = backup['share_id']
         share = self.db.share_get(context, share_id)
         share_instance = self._get_share_instance(context, share)
 
         try:
+            if (self.driver.restore_to_target_support is False and
+                    share_id != backup_share_id):
+
+                self.message_api.create(
+                    context,
+                    message_field.Action.RESTORE_BACKUP,
+                    share['project_id'],
+                    resource_type=message_field.Resource.SHARE,
+                    resource_id=share['id'],
+                    detail=message_field.Detail.TARGETED_RESTORE_UNSUPPORTED
+                )
+
+                msg = _("Cannot restore backup %(backup)s to target share "
+                        "%(share)s as share driver does not provide support "
+                        " for targeted restores") % (
+                            {'backup': backup_id, 'share': share_id})
+                LOG.exception(msg)
+                raise exception.BackupException(reason=msg)
+
             share_server = self._get_share_server(context, share_instance)
             self.driver.restore_backup(context, backup, share_instance,
                                        share_server=share_server)
@@ -6240,32 +6418,12 @@ class ShareManager(manager.SchedulerDependentManager):
         dest_snss = self.db.share_network_subnet_get_all_by_share_server_id(
             context, dest_share_server['id'])
 
+        existing_allocations = (
+            self.db.network_allocations_get_for_share_server(
+                context, dest_share_server['id']))
+        migration_reused_network_allocations = len(existing_allocations) == 0
         migration_extended_network_allocations = (
             CONF.server_migration_extend_neutron_network)
-
-        # NOTE: Network allocations are extended to the destination host on
-        # previous (migration_start) step, i.e. port bindings are created on
-        # destination host with existing ports. The network allocations will be
-        # cut over on this (migration_complete) step, i.e. port bindings on
-        # destination host will be activated and bindings on source host will
-        # be deleted.
-        if migration_extended_network_allocations:
-            updated_allocations = (
-                self.driver.network_api.cutover_network_allocations(
-                    context, source_share_server))
-            segmentation_id = self.db.share_server_backend_details_get_item(
-                context, dest_share_server['id'], 'segmentation_id')
-            alloc_update = {
-                'segmentation_id': segmentation_id,
-                'share_server_id': dest_share_server['id']
-            }
-            subnet_update = {
-                'segmentation_id': segmentation_id,
-            }
-
-        migration_reused_network_allocations = (len(
-            self.db.network_allocations_get_for_share_server(
-                context, dest_share_server['id'])) == 0)
 
         server_to_get_allocations = (
             dest_share_server
@@ -6279,30 +6437,52 @@ class ShareManager(manager.SchedulerDependentManager):
             context, source_share_server, dest_share_server, share_instances,
             snapshot_instances, new_network_allocations)
 
+        alloc_update = {
+            'share_server_id': dest_share_server['id']
+        }
+        subnet_update = {}
+
         if migration_extended_network_allocations:
-            for alloc in updated_allocations:
-                self.db.network_allocation_update(context, alloc['id'],
-                                                  alloc_update)
-            for subnet in dest_snss:
-                self.db.share_network_subnet_update(context, subnet['id'],
-                                                    subnet_update)
-        elif not migration_reused_network_allocations:
+            # NOTE: Network allocations are extended to the destination host on
+            # previous (migration_start) step, i.e. port bindings are created
+            # on destination host with existing ports. The network allocations
+            # will be cut over on this (migration_complete) step, i.e. port
+            # bindings on destination host will be activated and bindings on
+            # source host will be deleted.
+            updated_allocations = (
+                self.driver.network_api.cutover_network_allocations(
+                    context, source_share_server))
+            segmentation_id = self.db.share_server_backend_details_get_item(
+                context, dest_share_server['id'], 'segmentation_id')
+            alloc_update.update({
+                'segmentation_id': segmentation_id
+            })
+            subnet_update.update({
+                'segmentation_id': segmentation_id,
+            })
+        elif migration_reused_network_allocations:
+            updated_allocations = (
+                self.db.network_allocations_get_for_share_server(
+                    context, source_share_server["id"]))
+        else:
             network_allocations = []
             for net_allocation in new_network_allocations:
                 network_allocations += net_allocation['network_allocations']
 
-            all_allocations = [
-                network_allocations,
-                new_network_allocations[0]['admin_network_allocations']
+            updated_allocations = [
+                *network_allocations,
+                *new_network_allocations[0]['admin_network_allocations']
             ]
-            for allocations in all_allocations:
-                for allocation in allocations:
-                    allocation_id = allocation['id']
-                    values = {
-                        'share_server_id': dest_share_server['id']
-                    }
-                    self.db.network_allocation_update(
-                        context, allocation_id, values)
+
+        for allocation in updated_allocations:
+            allocation_id = allocation['id']
+            self.db.network_allocation_update(
+                context, allocation_id, alloc_update)
+
+        if subnet_update:
+            for subnet in dest_snss:
+                self.db.share_network_subnet_update(context, subnet['id'],
+                                                    subnet_update)
 
         # If share server doesn't have an identifier, we didn't ask the driver
         # to create a brand new server - this was a nondisruptive migration
@@ -6873,8 +7053,9 @@ class ShareManager(manager.SchedulerDependentManager):
         current_subnets = [subnet for subnet in current_subnets
                            if subnet['id'] != new_share_network_subnet_id]
         share_servers = (
-            self.db.share_server_get_all_by_host_and_share_subnet(
-                context, self.host, new_share_network_subnet_id))
+            self.db.share_server_get_all_by_host_and_or_share_subnet(
+                context, host=self.host,
+                share_subnet_id=new_share_network_subnet_id))
         for share_server in share_servers:
 
             share_server_id = share_server['id']
@@ -6949,4 +7130,41 @@ class ShareManager(manager.SchedulerDependentManager):
                 share['project_id'],
                 resource_type=message_field.Resource.SHARE,
                 resource_id=share_id,
+                detail=message_field.Detail.UPDATE_METADATA_FAILURE)
+
+    def update_share_network_subnet_from_metadata(self, context,
+                                                  share_network_id,
+                                                  share_network_subnet_id,
+                                                  share_server_id,
+                                                  metadata):
+        share_network = self.db.share_network_get(context, share_network_id)
+        share_network_subnet = self.db.share_network_subnet_get(
+            context, share_network_subnet_id)
+        share_server = self.db.share_server_get(context, share_server_id)
+
+        try:
+            self.driver.update_share_network_subnet_from_metadata(
+                context,
+                share_network,
+                share_network_subnet,
+                share_server,
+                metadata)
+            self.message_api.create(
+                context,
+                message_field.Action.UPDATE_METADATA,
+                share_network['project_id'],
+                resource_type=message_field.Resource.SHARE_NETWORK_SUBNET,
+                resource_id=share_network_subnet_id,
+                detail=message_field.Detail.UPDATE_METADATA_SUCCESS)
+        except Exception as e:
+            if isinstance(e, NotImplementedError):
+                LOG.debug("Not passing the updates of share network subnet "
+                          "metadata to share driver since the required driver "
+                          "interface is not implemented.")
+            self.message_api.create(
+                context,
+                message_field.Action.UPDATE_METADATA,
+                share_network['project_id'],
+                resource_type=message_field.Resource.SHARE_NETWORK_SUBNET,
+                resource_id=share_network_subnet_id,
                 detail=message_field.Detail.UPDATE_METADATA_FAILURE)

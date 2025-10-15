@@ -10,13 +10,13 @@
 
 .. _manila-vastdata:
 
-.. list-table:: Description of Vastdata share driver configuration options
+.. list-table:: Description of VAST share driver configuration options
    :header-rows: 1
    :class: config-ref-table
 
    * - Configuration option = Default value
      - Description
-   * - **[DEFAULT]**
+   * - **[vast]**
      -
    * - ``vast_mgmt_host`` =
      - (String) Hostname or IP address VAST storage system management VIP.
@@ -30,3 +30,5 @@
      - (String) Username for VAST management API.
    * - ``vast_mgmt_password`` =
      - (String) Password for VAST management API.
+   * - ``vast_api_token`` =
+     - (String) API token for accessing VAST mgmt. If provided, it will be used instead of 'vast_mgmt_user' and 'vast_mgmt_password'.

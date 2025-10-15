@@ -55,6 +55,8 @@ neutron_opts = [
     cfg.StrOpt(
         'endpoint_type',
         default='publicURL',
+        choices=['publicURL', 'internalURL', 'adminURL',
+                 'public', 'internal', 'admin'],
         help='Endpoint type to be used with neutron client calls.'),
     cfg.StrOpt(
         'region_name',
@@ -195,6 +197,9 @@ class API(object):
                 raise exception.PortLimitExceeded()
             raise exception.NetworkException(code=e.status_code,
                                              message=e.message)
+        except neutron_client_exc.IpAddressGenerationFailureClient:
+            LOG.warning('No free IP addresses in neutron subnet %s', subnet_id)
+            raise exception.IpAddressGenerationFailureClient()
         except ks_exec.ConnectFailure:
             LOG.warning('Create Port: Neutron connection failure')
             # check if port is created in neutron else re-raise connectFailure
@@ -209,6 +214,7 @@ class API(object):
             except ks_exec.ConnectFailure as kse:
                 raise kse
 
+    @utils.retry(retry_param=ks_exec.ConnectFailure, retries=5)
     def delete_port(self, port_id):
         try:
             self.client.delete_port(port_id)
@@ -218,6 +224,8 @@ class API(object):
         except neutron_client_exc.NeutronClientException as e:
             raise exception.NetworkException(code=e.status_code,
                                              message=e.message)
+        except ks_exec.ConnectFailure as e:
+            raise e
 
     def delete_subnet(self, subnet_id):
         try:

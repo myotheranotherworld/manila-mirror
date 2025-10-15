@@ -112,6 +112,7 @@ class NetAppCmodeFileStorageLibrary(object):
         'netapp:snapshot_policy': 'snapshot_policy',
         'netapp:language': 'language',
         'netapp:max_files': 'max_files',
+        'netapp:max_files_multiplier': 'max_files_multiplier',
         'netapp:adaptive_qos_policy_group': 'adaptive_qos_policy_group',
         'netapp:fpolicy_extensions_to_include':
             'fpolicy_extensions_to_include',
@@ -174,6 +175,8 @@ class NetAppCmodeFileStorageLibrary(object):
         self.configuration = kwargs['configuration']
         self.configuration.append_config_values(na_opts.netapp_connection_opts)
         self.configuration.append_config_values(na_opts.netapp_basicauth_opts)
+        self.configuration.append_config_values(
+            na_opts.netapp_certificateauth_opts)
         self.configuration.append_config_values(na_opts.netapp_transport_opts)
         self.configuration.append_config_values(na_opts.netapp_support_opts)
         self.configuration.append_config_values(na_opts.netapp_cluster_opts)
@@ -268,7 +271,12 @@ class NetAppCmodeFileStorageLibrary(object):
                 port=config.netapp_server_port,
                 vserver=vserver,
                 trace=na_utils.TRACE_API,
-                api_trace_pattern=na_utils.API_TRACE_PATTERN)
+                api_trace_pattern=na_utils.API_TRACE_PATTERN,
+                private_key_file=config.netapp_private_key_file,
+                certificate_file=config.netapp_certificate_file,
+                ca_certificate_file=config.netapp_ca_certificate_file,
+                certificate_host_validation=(
+                    config.netapp_certificate_host_validation))
         else:
             client = client_cmode_rest.NetAppRestClient(
                 transport_type=config.netapp_transport_type,
@@ -281,7 +289,12 @@ class NetAppCmodeFileStorageLibrary(object):
                 trace=na_utils.TRACE_API,
                 async_rest_timeout=(
                     config.netapp_rest_operation_timeout),
-                api_trace_pattern=na_utils.API_TRACE_PATTERN)
+                api_trace_pattern=na_utils.API_TRACE_PATTERN,
+                private_key_file=config.netapp_private_key_file,
+                certificate_file=config.netapp_certificate_file,
+                ca_certificate_file=config.netapp_ca_certificate_file,
+                certificate_host_validation=(
+                    config.netapp_certificate_host_validation))
         return client
 
     @na_utils.trace
@@ -402,9 +415,11 @@ class NetAppCmodeFileStorageLibrary(object):
             return self._client.check_snaprestore_license()
 
     @na_utils.trace
-    def _get_aggregate_node(self, aggregate_name):
+    def _get_aggregate_node(self, aggregate_name, cluster_client=None):
         """Get home node for the specified aggregate, or None."""
-        if self._have_cluster_creds:
+        if cluster_client:
+            return cluster_client.get_node_for_aggregate(aggregate_name)
+        elif self._have_cluster_creds:
             return self._client.get_node_for_aggregate(aggregate_name)
         else:
             return None
@@ -534,6 +549,11 @@ class NetAppCmodeFileStorageLibrary(object):
         else:
             qos_support = False
 
+        # Share-server/share encryption support with NetApp will only be
+        # possible with DHSS=True
+        encryption_support = None if self.configuration.safe_get(
+            'netapp_vserver') else ['share_server']
+
         netapp_flexvol_encryption = self._cluster_info.get(
             'nve_support', False)
         reserved_percentage = self.configuration.reserved_share_percentage
@@ -571,6 +591,8 @@ class NetAppCmodeFileStorageLibrary(object):
             'security_service_update_support': True,
             'share_server_multiple_subnet_support': True,
             'mount_point_name_support': True,
+            'share_replicas_migration_support': True,
+            'encryption_support': encryption_support,
         }
 
         # Add storage service catalog data.
@@ -1155,10 +1177,17 @@ class NetAppCmodeFileStorageLibrary(object):
         hide_snapdir = provisioning_options.pop('hide_snapdir')
         mount_point_name = share.get('mount_point_name')
 
-        LOG.debug('Creating share %(share)s on pool %(pool)s with '
-                  'provisioning options %(options)s',
-                  {'share': share_name, 'pool': pool_name,
-                   'options': provisioning_options})
+        if share.get('encryption_key_ref'):
+            provisioning_options['encrypt'] = True
+            LOG.debug('Creating an encrypted share %(share)s on pool %(pool)s '
+                      'with provisioning options %(options)s',
+                      {'share': share_name, 'pool': pool_name,
+                       'options': provisioning_options})
+        else:
+            LOG.debug('Creating share %(share)s on pool %(pool)s with '
+                      'provisioning options %(options)s',
+                      {'share': share_name, 'pool': pool_name,
+                       'options': provisioning_options})
 
         if self._is_flexgroup_pool(pool_name):
             aggr_list = self._get_flexgroup_aggregate_list(pool_name)
@@ -1225,6 +1254,13 @@ class NetAppCmodeFileStorageLibrary(object):
         vserver_client.update_volume_efficiency_attributes(
             share_name, dedup_enabled, compression_enabled, is_flexgroup=True,
             efficiency_policy=efficiency_policy)
+
+        if provisioning_options.get('max_files_multiplier') is not None:
+            max_files_multiplier = provisioning_options.pop(
+                'max_files_multiplier')
+            max_files = na_utils.calculate_max_files(size,
+                                                     max_files_multiplier,
+                                                     max_files)
 
         if max_files is not None:
             vserver_client.set_volume_max_files(share_name, max_files)
@@ -1354,6 +1390,11 @@ class NetAppCmodeFileStorageLibrary(object):
         if 'netapp:max_files' in extra_specs:
             self._check_if_max_files_is_valid(share,
                                               extra_specs['netapp:max_files'])
+
+        if 'netapp:max_files_multiplier' in extra_specs:
+            self._check_if_max_files_multiplier_is_valid(
+                share, extra_specs['netapp:max_files_multiplier'])
+
         if 'netapp:fpolicy_file_operations' in extra_specs:
             self._check_fpolicy_file_operations(
                 share, extra_specs['netapp:fpolicy_file_operations'])
@@ -1380,6 +1421,22 @@ class NetAppCmodeFileStorageLibrary(object):
             msg = _('Invalid value "%(value)s" for extra_spec "%(key)s" '
                     'in share_type %(type_id)s for share %(share_id)s.')
             raise exception.NetAppException(msg % args)
+
+    @na_utils.trace
+    def _check_if_max_files_multiplier_is_valid(self, share, value):
+        """Check if max_files_multiplier has a valid value."""
+        try:
+            if float(value) <= 0 or float(value) > 8:
+                args = {'value': value,
+                        'key': 'netapp:max_files_multiplier',
+                        'type_id': share['share_type_id'],
+                        'share_id': share['id']}
+                msg = _('Invalid value "%(value)s" for extra_spec "%(key)s" '
+                        'in share_type %(type_id)s for share %(share_id)s. '
+                        'Must be between "0" and "8".')
+                raise exception.NetAppException(msg % args)
+        except ValueError as e:
+            raise exception.InvalidInput(e)
 
     @na_utils.trace
     def _check_fpolicy_file_operations(self, share, value):
@@ -1487,7 +1544,8 @@ class NetAppCmodeFileStorageLibrary(object):
                 raise exception.Invalid(msg % arg_map)
 
     @na_utils.trace
-    def _get_boolean_provisioning_options(self, specs, boolean_specs_map):
+    def _get_boolean_provisioning_options(self, extra_specs,
+                                          boolean_specs_map):
         """Given extra specs, return corresponding client library kwargs.
 
         Build a full set of client library provisioning kwargs, filling in a
@@ -1496,6 +1554,7 @@ class NetAppCmodeFileStorageLibrary(object):
         "false", with missing specs treated as "false".  Provisioning kwarg
         values are True or False.
         """
+        specs = copy.deepcopy(extra_specs)
         # Extract the extra spec keys of concern and their corresponding
         # kwarg keys as lists.
         keys_of_interest = list(boolean_specs_map)
@@ -1515,13 +1574,14 @@ class NetAppCmodeFileStorageLibrary(object):
         return dict(zip(provisioning_args, provisioning_values))
 
     @na_utils.trace
-    def get_string_provisioning_options(self, specs, string_specs_map):
+    def get_string_provisioning_options(self, extra_specs, string_specs_map):
         """Given extra specs, return corresponding client library kwargs.
 
         Build a full set of client library provisioning kwargs, filling in a
         default value if an explicit value has not been supplied via a
         corresponding extra spec.
         """
+        specs = copy.deepcopy(extra_specs)
         # Extract the extra spec keys of concern and their corresponding
         # kwarg keys as lists.
         keys_of_interest = list(string_specs_map)
@@ -1631,6 +1691,8 @@ class NetAppCmodeFileStorageLibrary(object):
                                                 qos_specs=None):
         """Checks if provided provisioning options are valid."""
         adaptive_qos = provisioning_options.get('adaptive_qos_policy_group')
+        max_files = provisioning_options.get('max_files')
+        max_files_multiplier = provisioning_options.get('max_files_multiplier')
         replication_type = (extra_specs.get('replication_type')
                             if extra_specs else None)
         if adaptive_qos and qos_specs:
@@ -1650,6 +1712,11 @@ class NetAppCmodeFileStorageLibrary(object):
         if adaptive_qos and replication_type:
             msg = _("The extra spec 'adaptive_qos_policy_group' is not "
                     "supported by share replication feature.")
+            raise exception.NetAppException(msg)
+
+        if max_files and max_files_multiplier:
+            msg = _("Share cannot be provisioned with both 'max_files' and "
+                    "'max_files_multiplier' extra specs.")
             raise exception.NetAppException(msg)
 
         # NOTE(dviroel): This validation will need to be updated if newer
@@ -1721,6 +1788,11 @@ class NetAppCmodeFileStorageLibrary(object):
             share, vserver, vserver_client=vserver_client)
 
         hide_snapdir = provisioning_options.pop('hide_snapdir')
+        mount_point_name = share.get('mount_point_name')
+
+        # split in args takes precedence over split in provisioning_options
+        if split is None:
+            split = provisioning_options.pop('split')
 
         # split in args takes precedence over split in provisioning_options
         if split is None:
@@ -1729,10 +1801,17 @@ class NetAppCmodeFileStorageLibrary(object):
         LOG.debug('Creating share from snapshot %s', snapshot['id'])
         vserver_client.create_volume_clone(
             share_name, parent_share_name, parent_snapshot_name,
+            mount_point_name=mount_point_name,
             **provisioning_options)
 
         if share['size'] > snapshot['size']:
             vserver_client.set_volume_size(share_name, share['size'])
+            if provisioning_options.get('max_files_multiplier') is not None:
+                max_files_multiplier = provisioning_options.pop(
+                    'max_files_multiplier')
+                max_files = na_utils.calculate_max_files(share['size'],
+                                                         max_files_multiplier)
+                vserver_client.set_volume_max_files(share_name, max_files)
 
         if hide_snapdir:
             self._apply_snapdir_visibility(
@@ -1801,6 +1880,7 @@ class NetAppCmodeFileStorageLibrary(object):
 
     @na_utils.trace
     def _create_export(self, share, share_server, vserver, vserver_client,
+                       cluster_client=None,
                        clear_current_export_policy=True,
                        ensure_share_already_exists=False, replica=False,
                        share_host=None):
@@ -1822,7 +1902,7 @@ class NetAppCmodeFileStorageLibrary(object):
 
         # Get LIF addresses with metadata
         export_addresses = self._get_export_addresses_with_metadata(
-            share, share_server, interfaces, host)
+            share, share_server, interfaces, host, cluster_client)
 
         # Create the share and get a callback for generating export locations
         pool = share_utils.extract_host(share['host'], level='pool')
@@ -1852,7 +1932,8 @@ class NetAppCmodeFileStorageLibrary(object):
 
     @na_utils.trace
     def _get_export_addresses_with_metadata(self, share, share_server,
-                                            interfaces, share_host):
+                                            interfaces, share_host,
+                                            cluster_client=None):
         """Return interface addresses with locality and other metadata."""
 
         # Get home nodes so we can identify preferred paths
@@ -1860,11 +1941,12 @@ class NetAppCmodeFileStorageLibrary(object):
         home_node_set = set()
         if self._is_flexgroup_pool(pool):
             for aggregate_name in self._get_flexgroup_aggregate_list(pool):
-                home_node = self._get_aggregate_node(aggregate_name)
+                home_node = self._get_aggregate_node(
+                    aggregate_name, cluster_client)
                 if home_node:
                     home_node_set.add(home_node)
         else:
-            home_node = self._get_aggregate_node(pool)
+            home_node = self._get_aggregate_node(pool, cluster_client)
             if home_node:
                 home_node_set.add(home_node)
 
@@ -2153,14 +2235,6 @@ class NetAppCmodeFileStorageLibrary(object):
 
         share_name = self._get_backend_share_name(share['id'])
         mount_point_name = share.get('mount_point_name')
-        debug_args = {
-            'share': share_name,
-            'aggr': (",".join(aggregate_name) if flexgroup_vol
-                     else aggregate_name),
-            'options': provisioning_options
-        }
-        LOG.debug('Managing share %(share)s on aggregate(s) %(aggr)s with '
-                  'provisioning options %(options)s', debug_args)
 
         # Rename & remount volume on new path.
         vserver_client.unmount_volume(volume_name)
@@ -2171,6 +2245,19 @@ class NetAppCmodeFileStorageLibrary(object):
             share, extra_specs, vserver, vserver_client)
         if qos_policy_group_name:
             provisioning_options['qos_policy_group'] = qos_policy_group_name
+
+        snap_attributes = self._get_provisioning_options_for_snap_attributes(
+            vserver_client, share_name)
+        provisioning_options.update(snap_attributes)
+
+        debug_args = {
+            'share': share_name,
+            'aggr': (",".join(aggregate_name) if flexgroup_vol
+                     else aggregate_name),
+            'options': provisioning_options
+        }
+        LOG.debug('Managing share %(share)s on aggregate(s) %(aggr)s with '
+                  'provisioning options %(options)s', debug_args)
 
         # Modify volume to match extra specs.
         vserver_client.modify_volume(aggregate_name, share_name,
@@ -2187,6 +2274,14 @@ class NetAppCmodeFileStorageLibrary(object):
             vserver_client.modify_fpolicy_scope(
                 share_name, policy_name, shares_to_include=shares_to_include)
 
+        if provisioning_options.get('max_files_multiplier') is not None:
+            max_files_multiplier = provisioning_options.pop(
+                'max_files_multiplier')
+            max_files = na_utils.calculate_max_files(volume_size,
+                                                     max_files_multiplier)
+            vserver_client.set_volume_max_files(share_name, max_files,
+                                                retry_allocated=True)
+
         # Save original volume info to private storage.
         original_data = {
             'original_name': volume['name'],
@@ -2195,6 +2290,23 @@ class NetAppCmodeFileStorageLibrary(object):
         self.private_storage.update(share['id'], original_data)
 
         return volume_size
+
+    @na_utils.trace
+    def _get_provisioning_options_for_snap_attributes(self, vserver_client,
+                                                      volume_name):
+        provisioning_options = {}
+        snapshot_attributes = vserver_client.get_volume_snapshot_attributes(
+            volume_name)
+        if (
+            snapshot_attributes['snapshot-policy'].lower()
+            in self.configuration.netapp_volume_snapshot_policy_exceptions
+        ):
+            provisioning_options['snapshot_policy'] = (
+                snapshot_attributes['snapshot-policy'])
+            provisioning_options['hide_snapdir'] = (
+                snapshot_attributes['snapdir-access-enabled'].lower() != 'true'
+            )
+        return provisioning_options
 
     @na_utils.trace
     def _validate_volume_for_manage(self, volume, vserver_client):
@@ -2457,11 +2569,22 @@ class NetAppCmodeFileStorageLibrary(object):
         """Extends size of existing share."""
         vserver, vserver_client = self._get_vserver(share_server=share_server)
         share_name = self._get_backend_share_name(share['id'])
+        extra_specs = share_types.get_extra_specs_from_share(share)
+        provisioning_options = self._get_provisioning_options(extra_specs)
+
         vserver_client.set_volume_filesys_size_fixed(share_name,
                                                      filesys_size_fixed=False)
         LOG.debug('Extending share %(name)s to %(size)s GB.',
                   {'name': share_name, 'size': new_size})
         vserver_client.set_volume_size(share_name, new_size)
+
+        if provisioning_options.get('max_files_multiplier') is not None:
+            max_files_multiplier = provisioning_options.pop(
+                'max_files_multiplier')
+            max_files = na_utils.calculate_max_files(new_size,
+                                                     max_files_multiplier)
+            vserver_client.set_volume_max_files(share_name, max_files)
+
         self._adjust_qos_policy_with_volume_resize(share, new_size,
                                                    vserver_client)
 
@@ -2470,6 +2593,9 @@ class NetAppCmodeFileStorageLibrary(object):
         """Shrinks size of existing share."""
         vserver, vserver_client = self._get_vserver(share_server=share_server)
         share_name = self._get_backend_share_name(share['id'])
+        extra_specs = share_types.get_extra_specs_from_share(share)
+        provisioning_options = self._get_provisioning_options(extra_specs)
+
         vserver_client.set_volume_filesys_size_fixed(share_name,
                                                      filesys_size_fixed=False)
         LOG.debug('Shrinking share %(name)s to %(size)s GB.',
@@ -2490,9 +2616,17 @@ class NetAppCmodeFileStorageLibrary(object):
         self._adjust_qos_policy_with_volume_resize(
             share, new_size, vserver_client)
 
+        if provisioning_options.get('max_files_multiplier') is not None:
+            max_files_multiplier = provisioning_options.pop(
+                'max_files_multiplier')
+            max_files = na_utils.calculate_max_files(new_size,
+                                                     max_files_multiplier)
+            vserver_client.set_volume_max_files(share_name, max_files,
+                                                retry_allocated=True)
+
     @na_utils.trace
     def update_access(self, context, share, access_rules, add_rules,
-                      delete_rules, share_server=None):
+                      delete_rules, update_rules, share_server=None):
         """Updates access rules for a share."""
 
         # NOTE(felipe_rodrigues): do not add export rules to a non-active
@@ -2882,17 +3016,10 @@ class NetAppCmodeFileStorageLibrary(object):
         # than twice the replication schedule.
         if (last_update_timestamp and
             (timeutils.is_older_than(
-                datetime.datetime.utcfromtimestamp(last_update_timestamp)
+                datetime.datetime.fromtimestamp(
+                    last_update_timestamp,
+                    tz=datetime.timezone.utc).replace(tzinfo=None)
                 .isoformat(), (2 * self._snapmirror_schedule)))):
-            return constants.REPLICA_STATE_OUT_OF_SYNC
-
-        replica_backend = share_utils.extract_host(replica['host'],
-                                                   level='backend_name')
-        config = data_motion.get_backend_configuration(replica_backend)
-        config_size = (int(config.safe_get(
-            'netapp_snapmirror_last_transfer_size_limit')) * units.Ki)
-        last_transfer_size = int(snapmirror.get('last-transfer-size', 0))
-        if last_transfer_size > config_size:
             return constants.REPLICA_STATE_OUT_OF_SYNC
 
         last_transfer_error = snapmirror.get('last-transfer-error', None)
@@ -3016,6 +3143,21 @@ class NetAppCmodeFileStorageLibrary(object):
                                                orig_active_replica,
                                                is_dr,
                                                share_server=share_server)
+
+        extra_specs = share_types.get_extra_specs_from_share(
+            new_active_replica)
+        provisioning_options = self._get_provisioning_options(extra_specs)
+        if provisioning_options.get('max_files_multiplier') is not None:
+            max_files_multiplier = provisioning_options.pop(
+                'max_files_multiplier')
+            max_files = na_utils.calculate_max_files(
+                new_active_replica['size'], max_files_multiplier)
+            new_active_replica_share_name = self._get_backend_share_name(
+                new_active_replica['id'])
+            __, vserver_client = self._get_vserver(
+                share_server=share_server)
+            vserver_client.set_volume_max_files(new_active_replica_share_name,
+                                                max_files)
 
         self._update_autosize_attributes_after_promote_replica(
             orig_active_replica, new_active_replica, dm_session)
@@ -3295,8 +3437,11 @@ class NetAppCmodeFileStorageLibrary(object):
             return replica
 
         try:
+            replica_cluster_client = self._get_api_client_for_backend(
+                replica_backend)
             replica['export_locations'] = self._create_export(
                 replica, share_server, replica_vserver, replica_client,
+                cluster_client=replica_cluster_client,
                 replica=True)
         except netapp_api.NaApiError:
             replica['status'] = constants.STATUS_ERROR
@@ -3897,6 +4042,10 @@ class NetAppCmodeFileStorageLibrary(object):
             self._client.mark_qos_policy_group_for_deletion(
                 qos_policy_of_src_share)
 
+        snap_attributes = self._get_provisioning_options_for_snap_attributes(
+            vserver_client, new_share_volume_name)
+        provisioning_options.update(snap_attributes)
+
         destination_aggregate = share_utils.extract_host(
             destination_share['host'], level='pool')
 
@@ -4012,8 +4161,11 @@ class NetAppCmodeFileStorageLibrary(object):
 
                 max_throughput = self._get_max_throughput(
                     backend_volume_size, qos_specs)
-                self._client.qos_policy_group_modify(
-                    backend_volume['qos-policy-group-name'], max_throughput)
+                if (existing_qos_policy_group['max-throughput']
+                        != max_throughput):
+                    self._client.qos_policy_group_modify(
+                        backend_volume['qos-policy-group-name'],
+                        max_throughput)
                 self._client.qos_policy_group_rename(
                     backend_volume['qos-policy-group-name'],
                     qos_policy_group_name)
@@ -5172,22 +5324,55 @@ class NetAppCmodeFileStorageLibrary(object):
                                                      snapshot_policy)
 
     @na_utils.trace
-    def update_showmount(self, share, showmount, share_server=None):
-        _, vserver_client = self._get_vserver(share_server=share_server)
+    def update_showmount(self, showmount, share_server=None):
+        showmount = showmount.lower()
+        if showmount not in ('true', 'false'):
+            err_msg = _("Invalid showmount value supplied: %s.") % showmount
+            raise exception.NetAppException(err_msg)
+
+        vserver, vserver_client = self._get_vserver(share_server=share_server)
         vserver_client.update_showmount(showmount)
+
+    def update_pnfs(self, pnfs, share_server=None):
+        pnfs = pnfs.lower()
+        if pnfs not in ('true', 'false'):
+            err_msg = _("Invalid pnfs value supplied: %s.") % pnfs
+            raise exception.NetAppException(err_msg)
+
+        vserver, vserver_client = self._get_vserver(share_server=share_server)
+        vserver_client.update_pnfs(pnfs)
 
     @na_utils.trace
     def update_share_from_metadata(self, context, share, metadata,
                                    share_server=None):
         metadata_update_func_map = {
             "snapshot_policy": "update_volume_snapshot_policy",
-            "showmount": "update_showmount",
         }
 
         for k, v in metadata.items():
-            update_func = getattr(self, metadata_update_func_map.get(k))
-            if update_func:
-                update_func(share, v, share_server=share_server)
+            metadata_update_method = (
+                getattr(self, metadata_update_func_map.get(k))
+                if k in metadata_update_func_map.keys() else None)
+
+            if metadata_update_method:
+                metadata_update_method(share, v, share_server=share_server)
+
+    def update_share_network_subnet_from_metadata(self, context,
+                                                  share_network,
+                                                  share_network_subnet,
+                                                  share_server, metadata):
+        metadata_update_func_map = {
+            "showmount": "update_showmount",
+            "pnfs": "update_pnfs",
+        }
+
+        for k, v in metadata.items():
+            metadata_update_method = (
+                getattr(self, metadata_update_func_map.get(k))
+                if k in metadata_update_func_map.keys() else None)
+
+            if metadata_update_method:
+                metadata_update_method(v, share_server=share_server)
 
     @na_utils.trace
     def _get_aggregate_snaplock_type(self, aggr_name):

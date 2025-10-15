@@ -22,7 +22,6 @@ SQLAlchemy models for Manila data.
 from oslo_config import cfg
 from oslo_db.sqlalchemy import models
 from sqlalchemy import Column, Integer, String, schema
-from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import orm
 from sqlalchemy import ForeignKey, DateTime, Boolean, Enum
 from sqlalchemy_utils import generic_repr
@@ -30,7 +29,7 @@ from sqlalchemy_utils import generic_repr
 from manila.common import constants
 
 CONF = cfg.CONF
-BASE = declarative_base()
+BASE = orm.declarative_base()
 
 
 @generic_repr
@@ -203,6 +202,11 @@ class Share(BASE, ManilaBase):
     def export_location(self):
         if len(self.instances) > 0:
             return self.instance.export_location
+
+    @property
+    def encryption_key_ref(self):
+        if len(self.instances) > 0:
+            return self.instance.encryption_key_ref
 
     @property
     def is_busy(self):
@@ -387,6 +391,7 @@ class ShareInstance(BASE, ManilaBase):
     scheduled_at = Column(DateTime)
     launched_at = Column(DateTime)
     terminated_at = Column(DateTime)
+    encryption_key_ref = Column(String(36), nullable=True)
     replica_state = Column(String(255), nullable=True)
     cast_rules_to_readonly = Column(Boolean, default=False, nullable=False)
     share_type_id = Column(String(36), ForeignKey('share_types.id'),
@@ -428,6 +433,11 @@ class ShareInstance(BASE, ManilaBase):
         primaryjoin='and_('
                     'ShareInstance.share_type_id == ShareTypes.id, '
                     'ShareTypes.deleted == "False")')
+    share = orm.relationship(
+        'Share',
+        foreign_keys=share_id,
+        primaryjoin='ShareInstance.share_id == Share.id'
+    )
 
 
 class ShareInstanceExportLocations(BASE, ManilaBase):
@@ -683,8 +693,11 @@ class ShareSnapshot(BASE, ManilaBase):
         result = None
         if len(self.instances) > 0:
             def qualified_replica(x):
-                preferred_statuses = (constants.REPLICA_STATE_ACTIVE,)
-                return x['replica_state'] in preferred_statuses
+                if x is None:
+                    return False
+                else:
+                    preferred_statuses = (constants.REPLICA_STATE_ACTIVE,)
+                    return x['replica_state'] in preferred_statuses
 
             replica_snapshots = list(filter(
                 lambda x: qualified_replica(x.share_instance), self.instances))
@@ -712,9 +725,12 @@ class ShareSnapshot(BASE, ManilaBase):
         """
 
         def qualified_replica(x):
-            preferred_statuses = (constants.REPLICA_STATE_ACTIVE,
-                                  constants.REPLICA_STATE_IN_SYNC)
-            return x['replica_state'] in preferred_statuses
+            if x is None:
+                return False
+            else:
+                preferred_statuses = (constants.REPLICA_STATE_ACTIVE,
+                                      constants.REPLICA_STATE_IN_SYNC)
+                return x['replica_state'] in preferred_statuses
 
         replica_snapshots = list(filter(
             lambda x: qualified_replica(x['share_instance']), self.instances))
@@ -1120,6 +1136,10 @@ class ShareServer(BASE, ManilaBase):
         Boolean, nullable=False, default=False)
     network_allocation_update_support = Column(
         Boolean, nullable=False, default=False)
+    share_replicas_migration_support = Column(
+        Boolean, nullable=False, default=False)
+    encryption_key_ref = Column(String(36), nullable=True)
+    application_credential_id = Column(String(36), nullable=True)
     status = Column(Enum(
         constants.STATUS_INACTIVE, constants.STATUS_ACTIVE,
         constants.STATUS_ERROR, constants.STATUS_DELETING,
@@ -1183,6 +1203,39 @@ class ShareServer(BASE, ManilaBase):
                 if self.share_network_subnets else None)
 
     _extra_keys = ['backend_details', 'share_network_subnet_ids']
+
+
+class EncryptionRef(BASE, ManilaBase):
+    """Represents a share server with encryption keys."""
+    __tablename__ = 'encryption_refs'
+    id = Column(String(36), primary_key=True, nullable=False)
+    share_server_id = Column(
+        String(36), ForeignKey('share_servers.id'), unique=True)
+    share_instance_id = Column(
+        String(36), ForeignKey('share_instances.id'), unique=True)
+    encryption_key_ref = Column(String(36), nullable=True)
+    project_id = Column(String(255), nullable=True)
+    deleted = Column(String(36), default='False')
+
+    share_server = orm.relationship(
+        ShareServer,
+        backref=orm.backref(
+            'server_encryption_ref_entry', lazy='joined', uselist=False),
+        foreign_keys=share_server_id,
+        primaryjoin='and_('
+        'EncryptionRef.share_server_id == ShareServer.id,'
+        'EncryptionRef.deleted == "False")'
+    )
+
+    share_instance = orm.relationship(
+        ShareInstance,
+        backref=orm.backref(
+            'instance_encryption_ref_entry', lazy='joined', uselist=False),
+        foreign_keys=share_instance_id,
+        primaryjoin='and_('
+        'EncryptionRef.share_instance_id == ShareInstance.id,'
+        'EncryptionRef.deleted == "False")'
+    )
 
 
 class ShareServerBackendDetails(BASE, ManilaBase):
@@ -1601,7 +1654,9 @@ def get_aggregated_access_rules_state(instance_mappings):
         order = (constants.ACCESS_STATE_ERROR,
                  constants.ACCESS_STATE_DENYING,
                  constants.ACCESS_STATE_QUEUED_TO_DENY,
+                 constants.ACCESS_STATE_QUEUED_TO_UPDATE,
                  constants.ACCESS_STATE_QUEUED_TO_APPLY,
+                 constants.ACCESS_STATE_UPDATING,
                  constants.ACCESS_STATE_APPLYING,
                  constants.ACCESS_STATE_ACTIVE)
 

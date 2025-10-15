@@ -25,6 +25,7 @@ from oslo_config import cfg
 from oslo_config import types
 from oslo_log import log
 from oslo_utils import importutils
+from oslo_utils import timeutils
 from oslo_utils import units
 
 from manila.common import constants
@@ -111,21 +112,36 @@ cephfs_opts = [
                ),
     cfg.BoolOpt('cephfs_ganesha_server_is_remote',
                 default=False,
-                help="Whether the NFS-Ganesha server is remote to the driver."
-                ),
+                help="Whether the NFS-Ganesha server is remote to the driver.",
+                deprecated_for_removal=True,
+                deprecated_since='2025.1',
+                deprecated_reason="This option is used by the deprecated "
+                                  "NFSProtocolHelper"),
     cfg.HostAddressOpt('cephfs_ganesha_server_ip',
                        help="The IP address of the NFS-Ganesha server."),
     cfg.StrOpt('cephfs_ganesha_server_username',
                default='root',
                help="The username to authenticate as in the remote "
-                    "NFS-Ganesha server host."),
+                    "NFS-Ganesha server host.",
+               deprecated_for_removal=True,
+               deprecated_since='2025.1',
+               deprecated_reason="This option is used by the deprecated "
+                                 "NFSProtocolHelper"),
     cfg.StrOpt('cephfs_ganesha_path_to_private_key',
-               help="The path of the driver host's private SSH key file."),
+               help="The path of the driver host's private SSH key file.",
+               deprecated_for_removal=True,
+               deprecated_since='2025.1',
+               deprecated_reason="This option is used by the deprecated "
+                                 "NFSProtocolHelper"),
     cfg.StrOpt('cephfs_ganesha_server_password',
                secret=True,
                help="The password to authenticate as the user in the remote "
                     "Ganesha server host. This is not required if "
-                    "'cephfs_ganesha_path_to_private_key' is configured."),
+                    "'cephfs_ganesha_path_to_private_key' is configured.",
+               deprecated_for_removal=True,
+               deprecated_since='2025.1',
+               deprecated_reason="This option is used by the deprecated "
+                                 "NFSProtocolHelper"),
     cfg.ListOpt('cephfs_ganesha_export_ips',
                 default=[],
                 help="List of IPs to export shares. If not supplied, "
@@ -146,6 +162,12 @@ cephfs_opts = [
                     "startup. Ensuring would re-export shares and this "
                     "action isn't always required, unless something has "
                     "been administratively modified on CephFS."),
+    cfg.IntOpt('cephfs_cached_allocated_capacity_update_interval',
+               min=0,
+               default=60,
+               help="The maximum time in seconds that the cached pool "
+                    "data will be considered updated. If it is expired when "
+                    "trying to read the pool data, it must be refreshed.")
 ]
 
 cephfsnfs_opts = [
@@ -163,6 +185,32 @@ class RadosError(Exception):
     """Something went wrong talking to Ceph with librados"""
 
     pass
+
+
+class AllocationCapacityCache(object):
+    """AllocationCapacityCache for CephFS filesystems.
+
+    The cache validity is measured by a stop watch that is
+    not thread-safe.
+    """
+
+    def __init__(self, duration):
+        self._stop_watch = timeutils.StopWatch(duration)
+        self._cached_allocated_capacity = None
+
+    def is_expired(self):
+        return not self._stop_watch.has_started() or self._stop_watch.expired()
+
+    def get_data(self):
+        return self._cached_allocated_capacity
+
+    def update_data(self, cached_allocated_capacity):
+        if not self._stop_watch.has_started():
+            self._stop_watch.start()
+        else:
+            self._stop_watch.restart()
+
+        self._cached_allocated_capacity = cached_allocated_capacity
 
 
 def rados_command(rados_client, prefix=None, args=None,
@@ -242,6 +290,7 @@ class CephFSDriver(driver.ExecuteMixin, driver.GaneshaMixin,
         self._ceph_mon_version = None
         self.configuration.append_config_values(cephfs_opts)
         self.configuration.append_config_values(cephfsnfs_opts)
+        self._cached_allocated_capacity_gb = None
         self.private_storage = kwargs.get('private_storage')
 
         try:
@@ -277,16 +326,48 @@ class CephFSDriver(driver.ExecuteMixin, driver.GaneshaMixin,
             volname=self.volname)
 
         self.protocol_helper.init_helper()
+        allocation_capacity_gb = self._get_cephfs_filesystem_allocation()
+        self._cached_allocated_capacity_gb = AllocationCapacityCache(
+            self.configuration.cephfs_cached_allocated_capacity_update_interval
+        )
+        self._cached_allocated_capacity_gb.update_data(allocation_capacity_gb)
 
     def check_for_setup_error(self):
         """Returns an error if prerequisites aren't met."""
         self.protocol_helper.check_for_setup_error()
+
+    def _get_cephfs_filesystem_allocation(self):
+        allocated_capacity_gb = 0
+        argdict = {"vol_name": self.volname}
+        subvolumes = rados_command(
+            self.rados_client, "fs subvolume ls", argdict, json_obj=True)
+        for sub_vol in subvolumes:
+            argdict = {"vol_name": self.volname, "sub_name": sub_vol["name"]}
+            sub_info = rados_command(
+                self.rados_client, "fs subvolume info", argdict, json_obj=True)
+            size = sub_info.get('bytes_quota', 0)
+            if size == "infinite":
+                # If we have a share that has infinite quota, we should not
+                # add that to the allocated capacity as that would make the
+                # scheduler think this backend is full.
+                continue
+            allocated_capacity_gb += round(int(size) / units.Gi, 2)
+        return allocated_capacity_gb
 
     def _update_share_stats(self):
         stats = self.rados_client.get_cluster_stats()
 
         total_capacity_gb = round(stats['kb'] / units.Mi, 2)
         free_capacity_gb = round(stats['kb_avail'] / units.Mi, 2)
+        if self._cached_allocated_capacity_gb.is_expired():
+            allocated_capacity_gb = self._get_cephfs_filesystem_allocation()
+            self._cached_allocated_capacity_gb.update_data(
+                allocated_capacity_gb
+            )
+        else:
+            allocated_capacity_gb = (
+                self._cached_allocated_capacity_gb.get_data()
+            )
 
         data = {
             'vendor_name': 'Ceph',
@@ -299,6 +380,7 @@ class CephFSDriver(driver.ExecuteMixin, driver.GaneshaMixin,
                     'pool_name': 'cephfs',
                     'total_capacity_gb': total_capacity_gb,
                     'free_capacity_gb': free_capacity_gb,
+                    'allocated_capacity_gb': allocated_capacity_gb,
                     'qos': 'False',
                     'reserved_percentage': self.configuration.safe_get(
                         'reserved_share_percentage'),
@@ -314,11 +396,12 @@ class CephFSDriver(driver.ExecuteMixin, driver.GaneshaMixin,
                             'reserved_share_percentage'),
                     'dedupe': [False],
                     'compression': [False],
-                    'thin_provisioning': [False]
+                    'thin_provisioning': [True]
                 }
             ],
             'total_capacity_gb': total_capacity_gb,
             'free_capacity_gb': free_capacity_gb,
+            'allocated_capacity_gb': allocated_capacity_gb,
             'snapshot_support': True,
             'create_share_from_snapshot_support': True,
         }
@@ -732,11 +815,11 @@ class CephFSDriver(driver.ExecuteMixin, driver.GaneshaMixin,
         rados_command(self.rados_client, "fs subvolume rm", argdict)
 
     def update_access(self, context, share, access_rules, add_rules,
-                      delete_rules, share_server=None):
+                      delete_rules, update_rules, share_server=None):
         sub_name = self._get_subvolume_name(share['id'])
         return self.protocol_helper.update_access(
             context, share, access_rules, add_rules, delete_rules,
-            share_server=share_server, sub_name=sub_name)
+            update_rules, share_server=share_server, sub_name=sub_name)
 
     def get_backend_info(self, context):
         return self.protocol_helper.get_backend_info(context)
@@ -1139,7 +1222,8 @@ class NativeProtocolHelper(ganesha.NASHelperBase):
         rados_command(self.rados_client, "fs subvolume evict", argdict)
 
     def update_access(self, context, share, access_rules, add_rules,
-                      delete_rules, share_server=None, sub_name=None):
+                      delete_rules, update_rules, share_server=None,
+                      sub_name=None):
         access_updates = {}
 
         argdict = {
@@ -1520,27 +1604,39 @@ class NFSClusterProtocolHelper(NFSProtocolHelperMixin, ganesha.NASHelperBase):
         """Returns an error if prerequisites aren't met."""
         return
 
+    def _get_export_config(self, share, access, sub_name=None):
+        """Returns export configuration in JSON-encoded bytes."""
+        pseudo_path = self._get_export_pseudo_path(share, sub_name=sub_name)
+        argdict = {
+            "cluster_id": self.nfs_clusterid,
+            "pseudo_path": pseudo_path
+        }
+        export = rados_command(
+            self.rados_client, "nfs export info", argdict, json_obj=True)
+        if export:
+            export["clients"] = access
+        else:
+            export = {
+                "path": self._get_export_path(share, sub_name=sub_name),
+                "cluster_id": self.nfs_clusterid,
+                "pseudo": pseudo_path,
+                "squash": "none",
+                "security_label": True,
+                "fsal": {
+                    "name": "CEPH",
+                    "fs_name": self.volname,
+
+                },
+                "clients": access
+            }
+        return json.dumps(export).encode('utf-8')
+
     def _allow_access(self, share, access, sub_name=None):
         """Allow access to the share."""
-        export = {
-            "path": self._get_export_path(share, sub_name=sub_name),
-            "cluster_id": self.nfs_clusterid,
-            "pseudo": self._get_export_pseudo_path(share, sub_name=sub_name),
-            "squash": "none",
-            "security_label": True,
-            "fsal": {
-                "name": "CEPH",
-                "fs_name": self.volname,
-
-            },
-            "clients": access
-        }
-
         argdict = {
             "cluster_id": self.nfs_clusterid,
         }
-
-        inbuf = json.dumps(export).encode('utf-8')
+        inbuf = self._get_export_config(share, access, sub_name)
         rados_command(self.rados_client,
                       "nfs export apply", argdict, inbuf=inbuf)
 
@@ -1556,7 +1652,8 @@ class NFSClusterProtocolHelper(NFSProtocolHelperMixin, ganesha.NASHelperBase):
         rados_command(self.rados_client, "nfs export rm", argdict)
 
     def update_access(self, context, share, access_rules, add_rules,
-                      delete_rules, share_server=None, sub_name=None):
+                      delete_rules, update_rules, share_server=None,
+                      sub_name=None):
         """Update access rules of share.
 
         Creates an export per share. Modifies access rules of shares by

@@ -41,13 +41,11 @@ LOG = log.getLogger(__name__)
 container_opts = [
     cfg.StrOpt("container_linux_bridge_name",
                default="docker0",
-               required=True,
                help="Linux bridge used by container hypervisor to plug "
                     "host-side veth to. It will be unplugged from here "
                     "by the driver."),
     cfg.StrOpt("container_ovs_bridge_name",
                default="br-int",
-               required=True,
                help="OVS bridge to use to plug a container to."),
     cfg.BoolOpt("container_cifs_guest_ok",
                 default=True,
@@ -190,7 +188,7 @@ class ContainerShareDriver(driver.ShareDriver, driver.ExecuteMixin):
         pass
 
     def update_access(self, context, share, access_rules, add_rules,
-                      delete_rules, share_server=None):
+                      delete_rules, update_rules, share_server=None):
         server_id = self._get_container_name(share_server["id"])
         share_name = self._get_share_name(share)
         LOG.debug("Updating access to share %(share)s at "

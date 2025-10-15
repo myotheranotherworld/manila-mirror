@@ -419,6 +419,7 @@ class NetAppClientCmodeTestCase(test.TestCase):
 
     def test_create_vserver_no_ipspace(self):
 
+        self.client.features.add_feature('DELETE_RETENTION_HOURS')
         self.mock_object(self.client, 'send_request')
         self.mock_object(self.client,
                          '_modify_security_cert',
@@ -429,12 +430,15 @@ class NetAppClientCmodeTestCase(test.TestCase):
             'root-volume-security-style': 'unix',
             'root-volume-aggregate': fake.ROOT_VOLUME_AGGREGATE_NAME,
             'root-volume': fake.ROOT_VOLUME_NAME,
-            'name-server-switch': {'nsswitch': 'file'}
+            'name-server-switch': {'nsswitch': 'file'},
+            'is-space-reporting-logical': 'false',
+            'is-space-enforcement-logical': 'false'
         }
         vserver_modify_args = {
             'aggr-list': [{'aggr-name': aggr_name} for aggr_name
                           in fake.SHARE_AGGREGATE_NAMES],
-            'vserver-name': fake.VSERVER_NAME
+            'vserver-name': fake.VSERVER_NAME,
+            'volume-delete-retention-hours': 16,
         }
 
         self.client.create_vserver(fake.VSERVER_NAME,
@@ -442,7 +446,9 @@ class NetAppClientCmodeTestCase(test.TestCase):
                                    fake.ROOT_VOLUME_NAME,
                                    fake.SHARE_AGGREGATE_NAMES,
                                    None,
-                                   fake.SECURITY_CERT_LARGE_EXPIRE_DAYS)
+                                   fake.SECURITY_CERT_LARGE_EXPIRE_DAYS,
+                                   16,
+                                   False)
 
         self.client.send_request.assert_has_calls([
             mock.call('vserver-create', vserver_create_args),
@@ -453,6 +459,7 @@ class NetAppClientCmodeTestCase(test.TestCase):
     def test_create_vserver_with_ipspace(self):
 
         self.client.features.add_feature('IPSPACES')
+        self.client.features.add_feature('DELETE_RETENTION_HOURS')
         self.mock_object(self.client, 'send_request')
         self.mock_object(self.client,
                          '_modify_security_cert',
@@ -465,10 +472,13 @@ class NetAppClientCmodeTestCase(test.TestCase):
             'root-volume': fake.ROOT_VOLUME_NAME,
             'name-server-switch': {'nsswitch': 'file'},
             'ipspace': fake.IPSPACE_NAME,
+            'is-space-reporting-logical': 'false',
+            'is-space-enforcement-logical': 'false'
         }
         vserver_modify_args = {
             'aggr-list': [{'aggr-name': aggr_name} for aggr_name
                           in fake.SHARE_AGGREGATE_NAMES],
+            'volume-delete-retention-hours': 24,
             'vserver-name': fake.VSERVER_NAME
         }
 
@@ -477,7 +487,9 @@ class NetAppClientCmodeTestCase(test.TestCase):
                                    fake.ROOT_VOLUME_NAME,
                                    fake.SHARE_AGGREGATE_NAMES,
                                    fake.IPSPACE_NAME,
-                                   fake.SECURITY_CERT_LARGE_EXPIRE_DAYS)
+                                   fake.SECURITY_CERT_LARGE_EXPIRE_DAYS,
+                                   24,
+                                   False)
 
         self.client.send_request.assert_has_calls([
             mock.call('vserver-create', vserver_create_args),
@@ -539,23 +551,29 @@ class NetAppClientCmodeTestCase(test.TestCase):
     def test_create_vserver_dp_destination(self):
 
         self.client.features.add_feature('IPSPACES')
+        self.client.features.add_feature('DELETE_RETENTION_HOURS')
         self.mock_object(self.client, 'send_request')
 
         vserver_create_args = {
             'vserver-name': fake.VSERVER_NAME,
             'ipspace': fake.IPSPACE_NAME,
             'vserver-subtype': fake.VSERVER_TYPE_DP_DEST,
+            'is-space-reporting-logical': 'false',
+            'is-space-enforcement-logical': 'false'
         }
         vserver_modify_args = {
             'aggr-list': [{'aggr-name': aggr_name} for aggr_name
                           in fake.SHARE_AGGREGATE_NAMES],
+            'volume-delete-retention-hours': 18,
             'vserver-name': fake.VSERVER_NAME
         }
 
         self.client.create_vserver_dp_destination(
             fake.VSERVER_NAME,
             fake.SHARE_AGGREGATE_NAMES,
-            fake.IPSPACE_NAME)
+            fake.IPSPACE_NAME,
+            18,
+            False)
 
         self.client.send_request.assert_has_calls([
             mock.call('vserver-create', vserver_create_args),
@@ -570,7 +588,9 @@ class NetAppClientCmodeTestCase(test.TestCase):
                           fake.ROOT_VOLUME_NAME,
                           fake.SHARE_AGGREGATE_NAMES,
                           fake.IPSPACE_NAME,
-                          fake.SECURITY_CERT_LARGE_EXPIRE_DAYS)
+                          fake.SECURITY_CERT_LARGE_EXPIRE_DAYS,
+                          10,
+                          False)
 
     def test_get_vserver_root_volume_name(self):
 
@@ -1844,7 +1864,7 @@ class NetAppClientCmodeTestCase(test.TestCase):
         self.assertListEqual([], result)
 
     def test_disable_network_interface(self):
-        interface_name = fake.NETWORK_INTERFACES[0]['interface_name']
+        interface_name = fake.NETWORK_INTERFACES[0]['interface-name']
         vserver_name = fake.VSERVER_NAME
         expected_api_args = {
             'administrative-status': 'down',
@@ -1860,7 +1880,7 @@ class NetAppClientCmodeTestCase(test.TestCase):
             'net-interface-modify', expected_api_args)
 
     def test_delete_network_interface(self):
-        interface_name = fake.NETWORK_INTERFACES[0]['interface_name']
+        interface_name = fake.NETWORK_INTERFACES[0]['interface-name']
         vserver_name = fake.VSERVER_NAME
         expected_api_args = {
             'interface-name': interface_name,
@@ -1970,6 +1990,11 @@ class NetAppClientCmodeTestCase(test.TestCase):
 
     def test_delete_ipspace(self):
 
+        self.client.features.add_feature('IPSPACES')
+        mock_ipspace_has_data_vservers = self.mock_object(
+            self.client, 'ipspace_has_data_vservers',
+            mock.Mock(return_value=False))
+
         mock_delete_broadcast_domains_for_ipspace = self.mock_object(
             self.client, '_delete_broadcast_domains_for_ipspace')
         self.mock_object(self.client, 'send_request')
@@ -1977,6 +2002,8 @@ class NetAppClientCmodeTestCase(test.TestCase):
         self.client.delete_ipspace(fake.IPSPACE_NAME)
 
         net_ipspaces_destroy_args = {'ipspace': fake.IPSPACE_NAME}
+        mock_ipspace_has_data_vservers.assert_called_once_with(
+            fake.IPSPACE_NAME)
         mock_delete_broadcast_domains_for_ipspace.assert_called_once_with(
             fake.IPSPACE_NAME)
         self.client.send_request.assert_has_calls([
@@ -2436,7 +2463,8 @@ class NetAppClientCmodeTestCase(test.TestCase):
 
         self.client.setup_security_services([fake.LDAP_LINUX_SECURITY_SERVICE],
                                             self.vserver_client,
-                                            fake.VSERVER_NAME)
+                                            fake.VSERVER_NAME,
+                                            False)
 
         vserver_modify_args = {
             'name-mapping-switch': [
@@ -2462,7 +2490,8 @@ class NetAppClientCmodeTestCase(test.TestCase):
 
         self.client.setup_security_services([fake.CIFS_SECURITY_SERVICE],
                                             self.vserver_client,
-                                            fake.VSERVER_NAME)
+                                            fake.VSERVER_NAME,
+                                            False)
 
         vserver_modify_args = {
             'name-mapping-switch': [
@@ -2478,7 +2507,7 @@ class NetAppClientCmodeTestCase(test.TestCase):
         self.client.send_request.assert_has_calls([
             mock.call('vserver-modify', vserver_modify_args)])
         self.vserver_client.configure_active_directory.assert_has_calls([
-            mock.call(fake.CIFS_SECURITY_SERVICE, fake.VSERVER_NAME)])
+            mock.call(fake.CIFS_SECURITY_SERVICE, fake.VSERVER_NAME, False)])
         self.vserver_client.configure_cifs_options.assert_has_calls([
             mock.call(fake.CIFS_SECURITY_SERVICE)])
 
@@ -2490,7 +2519,8 @@ class NetAppClientCmodeTestCase(test.TestCase):
 
         self.client.setup_security_services([fake.KERBEROS_SECURITY_SERVICE],
                                             self.vserver_client,
-                                            fake.VSERVER_NAME)
+                                            fake.VSERVER_NAME,
+                                            False)
 
         vserver_modify_args = {
             'name-mapping-switch': [
@@ -2518,7 +2548,8 @@ class NetAppClientCmodeTestCase(test.TestCase):
                           self.client.setup_security_services,
                           [fake.INVALID_SECURITY_SERVICE],
                           self.vserver_client,
-                          fake.VSERVER_NAME)
+                          fake.VSERVER_NAME,
+                          False)
 
         vserver_modify_args = {
             'name-mapping-switch': [
@@ -2705,10 +2736,12 @@ class NetAppClientCmodeTestCase(test.TestCase):
 
         self.mock_object(self.client, 'send_request')
         self.mock_object(self.client, 'configure_dns')
+        self.mock_object(self.client, 'configure_cifs_aes_encryption')
         self.mock_object(self.client, 'set_preferred_dc')
 
         self.client.configure_active_directory(fake.CIFS_SECURITY_SERVICE,
-                                               fake.VSERVER_NAME)
+                                               fake.VSERVER_NAME,
+                                               False)
 
         cifs_server = (fake.VSERVER_NAME[0:8] +
                        '-' +
@@ -2725,6 +2758,7 @@ class NetAppClientCmodeTestCase(test.TestCase):
 
         self.client.configure_dns.assert_called_with(
             fake.CIFS_SECURITY_SERVICE)
+        self.client.configure_cifs_aes_encryption.assert_called_with(False)
         self.client.set_preferred_dc.assert_called_with(
             fake.CIFS_SECURITY_SERVICE)
         self.client.send_request.assert_has_calls([
@@ -2734,10 +2768,11 @@ class NetAppClientCmodeTestCase(test.TestCase):
 
         self.mock_object(self.client, 'send_request')
         self.mock_object(self.client, 'configure_dns')
+        self.mock_object(self.client, 'configure_cifs_aes_encryption')
         self.mock_object(self.client, 'set_preferred_dc')
 
         self.client.configure_active_directory(fake.CIFS_SECURITY_SERVICE_3,
-                                               fake.VSERVER_NAME)
+                                               fake.VSERVER_NAME, False)
 
         cifs_server = (fake.VSERVER_NAME[0:8] +
                        '-' +
@@ -2755,6 +2790,7 @@ class NetAppClientCmodeTestCase(test.TestCase):
 
         self.client.configure_dns.assert_called_with(
             fake.CIFS_SECURITY_SERVICE_3)
+        self.client.configure_cifs_aes_encryption.assert_called_with(False)
         self.client.set_preferred_dc.assert_called_with(
             fake.CIFS_SECURITY_SERVICE_3)
         self.client.send_request.assert_has_calls([
@@ -2768,7 +2804,8 @@ class NetAppClientCmodeTestCase(test.TestCase):
         self.assertRaises(exception.NetAppException,
                           self.client.configure_active_directory,
                           fake.CIFS_SECURITY_SERVICE,
-                          fake.VSERVER_NAME)
+                          fake.VSERVER_NAME,
+                          False)
 
     def test_create_kerberos_realm(self):
         self.client.features.add_feature('KERBEROS_VSERVER')
@@ -2988,7 +3025,91 @@ class NetAppClientCmodeTestCase(test.TestCase):
         self.assertTrue(result)
         self.client.send_request.assert_called_once_with(
             'kerberos-config-get', kerberos_config_get_args)
-        self.client.get_network_interfaces.assert_called_once()
+        self.client.get_network_interfaces.assert_called_once_with(
+            protocols=['NFS', 'CIFS'])
+
+    def test_is_kerberos_enabled_exception_raise(self):
+        self.client.features.add_feature('KERBEROS_VSERVER')
+        api_response = netapp_api.NaElement(
+            fake.KERBEROS_CONFIG_GET_RESPONSE)
+        self.mock_object(self.client, 'send_request',
+                         mock.Mock(side_effect=[api_response,
+                                   netapp_api.NaApiError('foobar')]))
+        self.mock_object(self.client,
+                         'get_network_interfaces',
+                         mock.Mock(return_value=[{'interface-name': 'lif1'},
+                                                 {'interface-name': 'lif2'},
+                                                 {'interface-name': 'lif3'}]))
+
+        self.assertRaises(netapp_api.NaApiError,
+                          self.client.is_kerberos_enabled)
+
+        kerberos_config_get_args_lif1 = {
+            'interface-name': 'lif1',
+            'desired-attributes': {
+                'kerberos-config-info': {
+                    'is-kerberos-enabled': None,
+                }
+            }
+        }
+
+        kerberos_config_get_args_lif2 = {
+            'interface-name': 'lif2',
+            'desired-attributes': {
+                'kerberos-config-info': {
+                    'is-kerberos-enabled': None,
+                }
+            }
+        }
+
+        self.client.send_request.assert_has_calls([
+            mock.call('kerberos-config-get', kerberos_config_get_args_lif1),
+            mock.call('kerberos-config-get', kerberos_config_get_args_lif2),
+        ])
+        self.client.get_network_interfaces.assert_called_once_with(
+            protocols=['NFS', 'CIFS'])
+
+    def test_is_kerberos_enabled_exception_return_false(self):
+        self.client.features.add_feature('KERBEROS_VSERVER')
+        api_response = netapp_api.NaElement(
+            fake.KERBEROS_CONFIG_GET_RESPONSE)
+        self.mock_object(
+            self.client, 'send_request',
+            mock.Mock(side_effect=[api_response, netapp_api.NaApiError(
+                message="entry doesn't exist")]))
+        self.mock_object(self.client,
+                         'get_network_interfaces',
+                         mock.Mock(return_value=[{'interface-name': 'lif1'},
+                                                 {'interface-name': 'lif2'},
+                                                 {'interface-name': 'lif3'}]))
+
+        result = self.client.is_kerberos_enabled()
+
+        kerberos_config_get_args_lif1 = {
+            'interface-name': 'lif1',
+            'desired-attributes': {
+                'kerberos-config-info': {
+                    'is-kerberos-enabled': None,
+                }
+            }
+        }
+
+        kerberos_config_get_args_lif2 = {
+            'interface-name': 'lif2',
+            'desired-attributes': {
+                'kerberos-config-info': {
+                    'is-kerberos-enabled': None,
+                }
+            }
+        }
+
+        self.assertFalse(result)
+        self.client.send_request.assert_has_calls([
+            mock.call('kerberos-config-get', kerberos_config_get_args_lif1),
+            mock.call('kerberos-config-get', kerberos_config_get_args_lif2),
+        ])
+        self.client.get_network_interfaces.assert_called_once_with(
+            protocols=['NFS', 'CIFS'])
 
     def test_get_kerberos_service_principal_name(self):
 
@@ -3124,6 +3245,46 @@ class NetAppClientCmodeTestCase(test.TestCase):
         }
         self.assertEqual(expected_result, result)
         self.client.send_request.assert_called_once_with('net-dns-get', {})
+
+    @ddt.data(True, False)
+    def test_configure_cifs_aes_encryption_enable(self, specify_types):
+        self.client.features.add_feature(
+            'AES_ENCRYPTION_TYPES', supported=specify_types)
+        self.mock_object(self.client, 'send_request')
+
+        self.client.configure_cifs_aes_encryption(True)
+
+        if specify_types:
+            configure_cifs_aes_encryption_args = {
+                'advertised-enc-types': [{'cifskrbenctypes': 'aes_128'},
+                                         {'cifskrbenctypes': 'aes_256'}]
+            }
+        else:
+            configure_cifs_aes_encryption_args = {
+                'is-aes-encryption-enabled': 'true',
+            }
+        self.client.send_request.assert_called_with(
+            'cifs-security-modify', configure_cifs_aes_encryption_args)
+
+    @ddt.data(True, False)
+    def test_configure_cifs_aes_encryption_disable(self, specify_types):
+        self.client.features.add_feature(
+            'AES_ENCRYPTION_TYPES', supported=specify_types)
+        self.mock_object(self.client, 'send_request')
+
+        self.client.configure_cifs_aes_encryption(False)
+
+        if specify_types:
+            configure_cifs_aes_encryption_args = {
+                'advertised-enc-types': [{'cifskrbenctypes': 'des'},
+                                         {'cifskrbenctypes': 'rc4'}]
+            }
+        else:
+            configure_cifs_aes_encryption_args = {
+                'is-aes-encryption-enabled': 'false',
+            }
+        self.client.send_request.assert_called_with(
+            'cifs-security-modify', configure_cifs_aes_encryption_args)
 
     @ddt.data(
         {
@@ -3781,7 +3942,10 @@ class NetAppClientCmodeTestCase(test.TestCase):
 
     def test_set_volume_max_files(self):
 
-        self.mock_object(self.client, 'send_request')
+        api_response = netapp_api.NaElement(fake.VOLUME_MODIFY_ITER_RESPONSE)
+        self.mock_object(self.client,
+                         'send_request',
+                         mock.Mock(return_value=api_response))
 
         self.client.set_volume_max_files(fake.SHARE_NAME, fake.MAX_FILES)
 
@@ -4490,6 +4654,42 @@ class NetAppClientCmodeTestCase(test.TestCase):
 
         self.assertFalse(result)
 
+    def test_get_volume_snapshot_attributes(self):
+
+        api_response = netapp_api.NaElement(
+            fake.VOLUME_GET_ITER_SNAPSHOT_ATTRIBUTES_RESPONSE)
+        self.mock_object(self.client,
+                         'send_request',
+                         mock.Mock(return_value=api_response))
+
+        result = self.client.get_volume_snapshot_attributes(fake.SHARE_NAME)
+
+        desired_snapshot_attributes = {
+            'snapshot-policy': None,
+            'snapdir-access-enabled': None,
+        }
+        snap_get_iter_args = {
+            'query': {
+                'volume-attributes': {
+                    'volume-id-attributes': {
+                        'name': fake.SHARE_NAME,
+                    },
+                },
+            },
+            'desired-attributes': {
+                'volume-attributes': {
+                    'volume-snapshot-attributes': desired_snapshot_attributes,
+                },
+            },
+        }
+
+        self.client.send_request.assert_has_calls([
+            mock.call('volume-get-iter', snap_get_iter_args)])
+
+        expected = {
+            'snapshot-policy': 'daily', 'snapdir-access-enabled': 'false'}
+        self.assertDictEqual(expected, result)
+
     @ddt.data(True, False)
     def test_get_volume(self, is_flexgroup):
 
@@ -4785,10 +4985,12 @@ class NetAppClientCmodeTestCase(test.TestCase):
               {'qos_policy_group_name': None,
                'adaptive_qos_policy_group_name':
                    fake.ADAPTIVE_QOS_POLICY_GROUP_NAME},
+              {'mount_point_name': None},
               )
     @ddt.unpack
-    def test_create_volume_clone(self, qos_policy_group_name,
-                                 adaptive_qos_policy_group_name):
+    def test_create_volume_clone(self, qos_policy_group_name=None,
+                                 adaptive_qos_policy_group_name=None,
+                                 mount_point_name=None):
         self.client.features.add_feature('ADAPTIVE_QOS')
         self.mock_object(self.client, 'send_request')
         set_qos_adapt_mock = self.mock_object(
@@ -4799,14 +5001,15 @@ class NetAppClientCmodeTestCase(test.TestCase):
             fake.SHARE_NAME,
             fake.PARENT_SHARE_NAME,
             fake.PARENT_SNAPSHOT_NAME,
+            mount_point_name=mount_point_name,
             qos_policy_group=qos_policy_group_name,
-            adaptive_qos_policy_group=adaptive_qos_policy_group_name)
+            adaptive_qos_policy_group=adaptive_qos_policy_group_name,)
 
         volume_clone_create_args = {
             'volume': fake.SHARE_NAME,
             'parent-volume': fake.PARENT_SHARE_NAME,
             'parent-snapshot': fake.PARENT_SNAPSHOT_NAME,
-            'junction-path': '/%s' % fake.SHARE_NAME
+            'junction-path': '/%s' % (mount_point_name or fake.SHARE_NAME)
         }
 
         if qos_policy_group_name:
@@ -5499,10 +5702,19 @@ class NetAppClientCmodeTestCase(test.TestCase):
 
         self.assertEqual({}, result)
 
-    @ddt.data(True, False)
-    def test_add_cifs_share_access(self, readonly):
+    @ddt.data({'readonly': False, 'exception': True},
+              {'readonly': True, 'exception': False},
+              {'readonly': False, 'exception': False},
+              {'readonly': True, 'exception': True})
+    @ddt.unpack
+    def test_add_cifs_share_access(self, readonly, exception):
 
-        self.mock_object(self.client, 'send_request')
+        mock_exception = mock.Mock(side_effect=netapp_api.NaApiError(
+            code=netapp_api.EDUPLICATEENTRY))
+
+        self.mock_object(
+            self.client, 'send_request',
+            mock_exception if exception else mock.Mock(return_value=None))
 
         self.client.add_cifs_share_access(fake.SHARE_NAME,
                                           fake.USER_NAME,
@@ -9367,12 +9579,14 @@ class NetAppClientCmodeTestCase(test.TestCase):
                          self._mock_api_error(code=netapp_api.EAPIERROR,
                                               message=msg))
         self.mock_object(self.client, 'configure_dns')
+        self.mock_object(self.client, 'configure_cifs_aes_encryption')
         self.mock_object(self.client, 'set_preferred_dc')
         self.mock_object(self.client, '_get_cifs_server_name')
         self.assertRaises(exception.SecurityServiceFailedAuth,
                           self.client.configure_active_directory,
                           fake.CIFS_SECURITY_SERVICE,
-                          fake.VSERVER_NAME)
+                          fake.VSERVER_NAME,
+                          False)
 
     def test_configure_active_directory_user_privilege_error(self):
         msg = "insufficient access"
@@ -9380,12 +9594,14 @@ class NetAppClientCmodeTestCase(test.TestCase):
                          self._mock_api_error(code=netapp_api.EAPIERROR,
                                               message=msg))
         self.mock_object(self.client, 'configure_dns')
+        self.mock_object(self.client, 'configure_cifs_aes_encryption')
         self.mock_object(self.client, 'set_preferred_dc')
         self.mock_object(self.client, '_get_cifs_server_name')
         self.assertRaises(exception.SecurityServiceFailedAuth,
                           self.client.configure_active_directory,
                           fake.CIFS_SECURITY_SERVICE,
-                          fake.VSERVER_NAME)
+                          fake.VSERVER_NAME,
+                          False)
 
     def test_snapmirror_restore_vol(self):
         self.mock_object(self.client, 'send_request')
@@ -9564,3 +9780,60 @@ class NetAppClientCmodeTestCase(test.TestCase):
             fake.SHARE_AGGREGATE_NAMES
         )
         self.assertIs(False, result)
+
+    def test_get_storage_failover_partner(self):
+        api_response = netapp_api.NaElement(fake.STORAGE_FAIL_OVER_PARTNER)
+        self.mock_object(self.client,
+                         'send_request',
+                         mock.Mock(return_value=api_response))
+
+        result = self.client.get_storage_failover_partner("fake_node")
+        self.assertEqual("fake_partner_node", result)
+
+    def test_get_migratable_data_lif_for_node(self):
+        api_response = netapp_api.NaElement(
+            fake.NET_INTERFACE_GET_ITER_RESPONSE)
+        self.mock_object(self.client,
+                         'send_iter_request',
+                         mock.Mock(return_value=api_response))
+        failover_policy = ['system-defined', 'sfo-partner-only']
+        protocols = ['nfs', 'cifs']
+        api_args = {
+            'query': {
+                'net-interface-info': {
+                    'failover-policy': '|'.join(failover_policy),
+                    'home-node': "fake_node",
+                    'data-protocols': {
+                        'data-protocol': '|'.join(protocols),
+                    }
+                }
+            }
+        }
+        result = self.client.get_migratable_data_lif_for_node("fake_node")
+        self.client.send_iter_request.assert_has_calls([
+            mock.call('net-interface-get-iter', api_args)])
+        self.assertEqual(list(fake.LIF_NAMES), result)
+
+    def test_get_data_lif_details_for_nodes(self):
+        api_response = netapp_api.NaElement(
+            fake.DATA_LIF_CAPACITY_DETAILS)
+        self.mock_object(self.client,
+                         'send_iter_request',
+                         mock.Mock(return_value=api_response))
+        api_args = {
+            'desired-attributes': {
+                'data-lif-capacity-details-info': {
+                    'limit-for-node': None,
+                    'count-for-node': None,
+                    'node': None
+                },
+            },
+        }
+        expected_result = [{'limit-for-node': '512',
+                            'count-for-node': '44',
+                            'node': 'fake_node',
+                            }]
+        result = self.client.get_data_lif_details_for_nodes()
+        self.client.send_iter_request.assert_has_calls([
+            mock.call('data-lif-capacity-details', api_args)])
+        self.assertEqual(expected_result, result)

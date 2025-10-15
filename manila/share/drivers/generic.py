@@ -417,9 +417,8 @@ class GenericShareDriver(driver.ExecuteMixin, driver.ShareDriver):
             "generic_driver_attach_detach_%s" % instance_id, external=True)
         def do_attach(volume):
             if volume['status'] == 'in-use':
-                attached_volumes = [vol.id for vol in
-                                    self.compute_api.instance_volumes_list(
-                                        self.admin_context, instance_id)]
+                attached_volumes = self.compute_api.instance_volumes_list(
+                    self.admin_context, instance_id)
                 if volume['id'] in attached_volumes:
                     return volume
                 else:
@@ -525,9 +524,8 @@ class GenericShareDriver(driver.ExecuteMixin, driver.ShareDriver):
         @utils.synchronized(
             "generic_driver_attach_detach_%s" % instance_id, external=True)
         def do_detach():
-            attached_volumes = [vol.id for vol in
-                                self.compute_api.instance_volumes_list(
-                                    self.admin_context, instance_id)]
+            attached_volumes = self.compute_api.instance_volumes_list(
+                self.admin_context, instance_id)
             try:
                 volume = self._get_volume(context, share['id'])
             except exception.VolumeNotFound:
@@ -864,7 +862,7 @@ class GenericShareDriver(driver.ExecuteMixin, driver.ShareDriver):
 
     @ensure_server
     def update_access(self, context, share, access_rules, add_rules,
-                      delete_rules, share_server=None):
+                      delete_rules, update_rules, share_server=None):
         """Update access rules for given share.
 
         This driver has two different behaviors according to parameters:
@@ -885,6 +883,8 @@ class GenericShareDriver(driver.ExecuteMixin, driver.ShareDriver):
                added. access_rules already contains these rules.
         :param delete_rules: Empty List or List of access rules which should be
                removed. access_rules doesn't contain these rules.
+        :param update_rules: Empty List or List of access rules which should be
+               updated. access_rules already contains these rules.
         :param share_server: None or Share server model
         """
         self._get_helper(share).update_access(share_server['backend_details'],
@@ -970,10 +970,8 @@ class GenericShareDriver(driver.ExecuteMixin, driver.ShareDriver):
         share_volume = get_volume()
 
         if share_volume:
-            instance_volumes = self.compute_api.instance_volumes_list(
+            attached_volumes = self.compute_api.instance_volumes_list(
                 self.admin_context, server_details['instance_id'])
-
-            attached_volumes = [vol.id for vol in instance_volumes]
             LOG.debug('Manage: attached volumes = %s', attached_volumes)
 
             if share_volume['id'] not in attached_volumes:

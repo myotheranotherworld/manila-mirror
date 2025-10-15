@@ -21,6 +21,7 @@ class Resource(object):
     SHARE_REPLICA = 'SHARE_REPLICA'
     SHARE_SNAPSHOT = 'SHARE_SNAPSHOT'
     SECURITY_SERVICE = 'SECURITY_SERVICE'
+    SHARE_NETWORK_SUBNET = 'SHARE_NETWORK_SUBNET'
 
 
 class Action(object):
@@ -38,6 +39,7 @@ class Action(object):
     ADD_UPDATE_SECURITY_SERVICE = ('011', _('add or update security service'))
     TRANSFER_ACCEPT = ('026', _('transfer accept'))
     UPDATE_METADATA = ('027', _('update_metadata'))
+    RESTORE_BACKUP = ('028', _('restore share backup'))
     ALL = (
         ALLOCATE_HOST,
         CREATE,
@@ -52,6 +54,7 @@ class Action(object):
         ADD_UPDATE_SECURITY_SERVICE,
         TRANSFER_ACCEPT,
         UPDATE_METADATA,
+        RESTORE_BACKUP
     )
 
 
@@ -164,6 +167,22 @@ class Detail(object):
         '030',
         _("Metadata passed to share driver failed to perform required "
           "operation."))
+    UPDATE_METADATA_NOT_DELETED = (
+        '031',
+        _("Metadata delete operation includes driver updatable metadata, and "
+          "it is not passed to share driver to perform required operation."))
+    TARGETED_RESTORE_UNSUPPORTED = (
+        '032',
+        _("Cannot restore a given backup to a target share, not supported by "
+          "share driver."))
+    NEUTRON_SUBNET_FULL = (
+        '033',
+        _("Share Driver failed to create share server on share network "
+          "due no more free IP addresses in the neutron subnet."
+          "You may free some IP addresses in the subnet "
+          "or create a new subnet/share network. If this doesn't work, "
+          "contact your administrator to troubleshoot "
+          "issues with your network."))
 
     ALL = (
         UNKNOWN_ERROR,
@@ -196,6 +215,9 @@ class Detail(object):
         SHARE_BACKEND_NOT_READY_YET,
         UPDATE_METADATA_SUCCESS,
         UPDATE_METADATA_FAILURE,
+        UPDATE_METADATA_NOT_DELETED,
+        TARGETED_RESTORE_UNSUPPORTED,
+        NEUTRON_SUBNET_FULL
     )
 
     # Exception and detail mappings

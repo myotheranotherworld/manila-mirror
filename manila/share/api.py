@@ -58,6 +58,11 @@ share_api_opts = [
                      'CreateFromSnapshotFilter is enabled and to have hosts '
                      'reporting replication_domain option.'
                 ),
+    cfg.StrOpt('default_mount_point_prefix',
+               default='{project_id}_',
+               help='Default prefix that will be used if none is provided'
+                    'through share_type extra specs. Prefix will only be'
+                    'used if share_type support mount_point_name.'),
     cfg.BoolOpt('is_deferred_deletion_enabled',
                 default=False,
                 help='Whether to delete shares and share snapshots in a '
@@ -202,6 +207,24 @@ class API(base.Base):
         return compatible_azs_name, compatible_azs_multiple
 
     @staticmethod
+    def check_if_encryption_keys_quotas_exceeded(context, quota_exception):
+        overs = quota_exception.kwargs['overs']
+        usages = quota_exception.kwargs['usages']
+        quotas = quota_exception.kwargs['quotas']
+
+        def _consumed(name):
+            return (usages[name]['reserved'] + usages[name]['in_use'])
+
+        if 'encryption_keys' in overs:
+            LOG.warning("Encryption keys quota exceeded for %(s_pid)s "
+                        "(%(d_consumed)d of %(d_quota)d keys already "
+                        "consumed).", {
+                            's_pid': context.project_id,
+                            'd_consumed': _consumed('encryption_keys'),
+                            'd_quota': quotas['encryption_keys']})
+            raise exception.EncryptionKeysLimitExceeded()
+
+    @staticmethod
     def check_if_share_quotas_exceeded(context, quota_exception,
                                        share_size, operation='create'):
         overs = quota_exception.kwargs['overs']
@@ -281,7 +304,7 @@ class API(base.Base):
                share_group_id=None, share_group_snapshot_member=None,
                availability_zones=None, scheduler_hints=None,
                az_request_multiple_subnet_support_map=None,
-               mount_point_name=None):
+               mount_point_name=None, encryption_key_ref=None):
         """Create new share."""
 
         api_common.check_metadata_properties(metadata)
@@ -377,11 +400,28 @@ class API(base.Base):
             deltas.update(
                 {'share_replicas': 1, 'replica_gigabytes': size})
 
+        if encryption_key_ref:
+            # Make sure encryption_key_ref is valid UUID
+            if not uuidutils.is_uuid_like(encryption_key_ref):
+                msg = _('Encryption key ref is not valid UUID')
+                raise exception.InvalidInput(reason=msg)
+
+            # Check if its new encryption_key_ref
+            filters = {
+                'encryption_key_ref': encryption_key_ref,
+                'project_id': context.project_id,
+            }
+            is_existing_key = self.db.encryption_keys_get_all(
+                context, filters=filters)
+            if not is_existing_key:
+                deltas.update({'encryption_keys': 1})
+
         try:
             reservations = QUOTAS.reserve(
                 context, share_type_id=share_type_id, **deltas)
         except exception.OverQuota as e:
             self.check_if_share_quotas_exceeded(context, e, size)
+            self.check_if_encryption_keys_quotas_exceeded(context, e)
             if share_type_supports_replication:
                 self.check_if_replica_quotas_exceeded(context, e, size,
                                                       resource_type='share')
@@ -512,7 +552,9 @@ class API(base.Base):
             snapshot_host=snapshot_host, scheduler_hints=scheduler_hints,
             az_request_multiple_subnet_support_map=(
                 az_request_multiple_subnet_support_map),
-            mount_point_name=mount_point_name)
+            mount_point_name=mount_point_name,
+            encryption_key_ref=encryption_key_ref,
+            )
 
         # Retrieve the share with instance details
         share = self.db.share_get(context, share['id'])
@@ -560,6 +602,34 @@ class API(base.Base):
             share = self.get(context, share_id)
             self.share_rpcapi.update_share_from_metadata(context, share,
                                                          driver_metadata)
+
+    def update_share_network_subnet_from_metadata(self, context,
+                                                  share_network_id,
+                                                  share_network_subnet_id,
+                                                  metadata):
+        driver_keys = getattr(CONF, 'driver_updatable_subnet_metadata', [])
+        if not driver_keys:
+            return
+
+        driver_metadata = {}
+        for k, v in metadata.items():
+            if k in driver_keys:
+                driver_metadata.update({k: v})
+
+        if driver_metadata:
+            share_servers = (
+                self.db.share_server_get_all_by_host_and_or_share_subnet(
+                    context,
+                    host=None,
+                    share_subnet_id=share_network_subnet_id))
+            for share_server in share_servers:
+                self.share_rpcapi.update_share_network_subnet_from_metadata(
+                    context,
+                    share_network_id,
+                    share_network_subnet_id,
+                    share_server,
+                    driver_metadata
+                )
 
     def get_share_attributes_from_share_type(self, share_type):
         """Determine share attributes from the share type.
@@ -644,7 +714,7 @@ class API(base.Base):
                         share_type_id=None, availability_zones=None,
                         snapshot_host=None, scheduler_hints=None,
                         az_request_multiple_subnet_support_map=None,
-                        mount_point_name=None):
+                        mount_point_name=None, encryption_key_ref=None):
         request_spec, share_instance = (
             self.create_share_instance_and_get_request_spec(
                 context, share, availability_zone=availability_zone,
@@ -655,7 +725,8 @@ class API(base.Base):
                 snapshot_host=snapshot_host,
                 az_request_multiple_subnet_support_map=(
                     az_request_multiple_subnet_support_map),
-                mount_point_name=mount_point_name))
+                mount_point_name=mount_point_name,
+                encryption_key_ref=encryption_key_ref))
 
         if share_group_snapshot_member:
             # Inherit properties from the share_group_snapshot_member
@@ -699,7 +770,7 @@ class API(base.Base):
             share_type_id=None, cast_rules_to_readonly=False,
             availability_zones=None, snapshot_host=None,
             az_request_multiple_subnet_support_map=None,
-            mount_point_name=None):
+            mount_point_name=None, encryption_key_ref=None):
 
         availability_zone_id = None
         if availability_zone:
@@ -720,6 +791,7 @@ class API(base.Base):
                 'share_type_id': share_type_id,
                 'cast_rules_to_readonly': cast_rules_to_readonly,
                 'mount_point_name': mount_point_name,
+                'encryption_key_ref': encryption_key_ref,
             }
         )
 
@@ -753,7 +825,8 @@ class API(base.Base):
             'host': share_instance['host'],
             'status': share_instance['status'],
             'replica_state': share_instance['replica_state'],
-            'share_type_id': share_instance['share_type_id']
+            'share_type_id': share_instance['share_type_id'],
+            'encryption_key_ref': share_instance['encryption_key_ref'],
         }
 
         share_type = None
@@ -1192,13 +1265,16 @@ class API(base.Base):
                                  mount_point_name=None):
         prefix = share_type.get('extra_specs').get(
             constants.ExtraSpecs.PROVISIONING_MOUNT_POINT_PREFIX)
-        prefix = prefix or context.project_id
-        prefix = prefix.format(context.to_dict())
-        mount_point_name = f"{prefix}_{mount_point_name}"
+        if prefix is None:
+            prefix = CONF.default_mount_point_prefix
+
+        mount_point_name_template = f"{prefix}{mount_point_name}"
+        mount_point_name = mount_point_name_template.format(
+            **context.to_dict())
 
         if mount_point_name and (
                 not re.match(
-                    r'^[a-zA-Z0-9_]*$', mount_point_name)
+                    r'^[a-zA-Z0-9_-]*$', mount_point_name)
                 or len(mount_point_name) > 255
         ):
             msg = _("Invalid mount_point_name: %s")
@@ -2303,7 +2379,8 @@ class API(base.Base):
             'display_description', 'display_description~', 'snapshot_id',
             'status', 'share_type_id', 'project_id', 'export_location_id',
             'export_location_path', 'limit', 'offset', 'host',
-            'share_network_id', 'is_soft_deleted']
+            'share_network_id', 'is_soft_deleted', 'mount_point_name',
+            'encryption_key_ref']
 
         for key in filter_keys:
             if key in search_opts:
@@ -2356,6 +2433,12 @@ class API(base.Base):
         if show_deferred_deleted:
             filters['list_deferred_delete'] = True
 
+        list_all_projects = False
+        all_tenants = utils.is_all_tenants(search_opts)
+        if all_tenants:
+            list_all_projects = policy.check_policy(
+                context, 'share', 'list_all_projects', do_raise=False)
+
         # Get filtered list of shares
         if 'host' in filters:
             policy.check_policy(context, 'share', 'list_by_host')
@@ -2365,7 +2448,7 @@ class API(base.Base):
             result = get_methods['get_by_share_server'](
                 context, search_opts.pop('share_server_id'), filters=filters,
                 sort_key=sort_key, sort_dir=sort_dir)
-        elif context.is_admin and utils.is_all_tenants(search_opts):
+        elif list_all_projects:
             result = get_methods['get_all'](
                 context, filters=filters, sort_key=sort_key, sort_dir=sort_dir)
         else:
@@ -2384,8 +2467,12 @@ class API(base.Base):
         return result
 
     def get_snapshot(self, context, snapshot_id):
-        policy.check_policy(context, 'share_snapshot', 'get_snapshot')
         snapshot = self.db.share_snapshot_get(context, snapshot_id)
+        authorized = policy.check_policy(context, 'share_snapshot',
+                                         'get_snapshot', snapshot,
+                                         do_raise=False)
+        if not authorized:
+            raise exception.NotFound()
         if snapshot.get('status') in (
             constants.STATUS_DEFERRED_DELETING,
                 constants.STATUS_ERROR_DEFERRED_DELETING):
@@ -2420,7 +2507,12 @@ class API(base.Base):
         LOG.debug("Searching for snapshots by: %s", search_opts)
 
         # Read and remove key 'all_tenants' if was provided
-        all_tenants = search_opts.pop('all_tenants', None)
+        list_all_projects = False
+        all_tenants = utils.is_all_tenants(search_opts)
+        if all_tenants:
+            search_opts.pop('all_tenants', None)
+            list_all_projects = policy.check_policy(
+                context, 'share_snapshot', 'list_all_projects', do_raise=False)
 
         string_args = {'sort_key': sort_key, 'sort_dir': sort_dir}
         string_args.update(search_opts)
@@ -2448,7 +2540,7 @@ class API(base.Base):
                 self.db.share_snapshot_get_all_by_project_with_count
                 if show_count else self.db.share_snapshot_get_all_by_project)}
 
-        if context.is_admin and all_tenants:
+        if list_all_projects:
             result = get_methods['get_all'](
                 context, filters=search_opts, limit=limit, offset=offset,
                 sort_key=sort_key, sort_dir=sort_dir)
@@ -2535,6 +2627,30 @@ class API(base.Base):
         self.access_helper.get_and_update_share_instance_access_rules_status(
             context, conditionally_change=conditionally_change,
             share_instance_id=share_instance['id'])
+
+    def update_access(self, ctx, share, access, values):
+
+        if self._any_invalid_share_instance(share, allow_on_error_state=True):
+            msg = _("Access rules cannot be updated while the share, "
+                    "any of its replicas or migration copies lacks a valid "
+                    "host or is in an invalid state.")
+            raise exception.InvalidShare(message=msg)
+
+        access = self.db.share_access_update(ctx, access['id'], values)
+        for share_instance in share.instances:
+            self.update_access_to_instance(ctx, share_instance, access)
+
+        return access
+
+    def update_access_to_instance(self, context, share_instance, access):
+        self._conditionally_transition_share_instance_access_rules_status(
+            context, share_instance)
+        updates = {'state': constants.ACCESS_STATE_QUEUED_TO_UPDATE}
+        self.access_helper.get_and_update_share_instance_access_rule(
+            context, access['id'], updates=updates,
+            share_instance_id=share_instance['id'])
+
+        self.share_rpcapi.update_access(context, share_instance)
 
     def deny_access(self, ctx, share, access, allow_on_error_state=False):
         """Deny access to share."""
@@ -3090,7 +3206,9 @@ class API(base.Base):
                             'share_status': share['status']}
                 raise exception.InvalidShareServer(reason=msg)
 
-            if share.has_replicas:
+            if (not share_server.get(
+                    'share_replicas_migration_support', False) and
+                    share.has_replicas):
                 msg = _('Share %s has replicas. Remove the replicas of all '
                         'shares in the share server before attempting to '
                         'migrate it.') % share['id']
@@ -3210,14 +3328,15 @@ class API(base.Base):
             {'task_state': constants.TASK_STATE_MIGRATION_STARTING,
              'status': constants.STATUS_SERVER_MIGRATING})
 
-        share_snapshots = [
-            self.db.share_snapshot_get_all_for_share(context, share['id'])
-            for share in shares]
-        snapshot_instance_ids = []
-        for snapshot_list in share_snapshots:
-            for snapshot in snapshot_list:
-                snapshot_instance_ids.append(snapshot['instance']['id'])
-        share_instance_ids = [share['instance']['id'] for share in shares]
+        share_instances = self.db.share_instance_get_all_by_share_server(
+            context, share_server['id'])
+        share_instance_ids = [
+            share_instance['id'] for share_instance in share_instances]
+
+        snap_instances = self.db.share_snapshot_instance_get_all_with_filters(
+            context, {'share_instance_ids': share_instance_ids})
+        snapshot_instance_ids = [
+            snap_instance['id'] for snap_instance in snap_instances]
 
         # Updates all shares and snapshot instances
         self.db.share_and_snapshot_instances_status_update(
@@ -4143,14 +4262,18 @@ class API(base.Base):
             data_rpc = data_rpcapi.DataAPI()
             data_rpc.delete_backup(context, backup)
 
-    def restore_share_backup(self, context, backup):
+    def restore_share_backup(self, context, backup, target_share_id=None):
         """Make the RPC call to restore a backup."""
         backup_id = backup['id']
         if backup['status'] != constants.STATUS_AVAILABLE:
             msg = (_('Backup %s status must be available.') % backup['id'])
             raise exception.InvalidBackup(reason=msg)
 
-        share = self.get(context, backup['share_id'])
+        if target_share_id:
+            share = self.get(context, target_share_id)
+        else:
+            share = self.get(context, backup['share_id'])
+
         share_id = share['id']
         if share['status'] != constants.STATUS_AVAILABLE:
             msg = _('Share to be restored to must be available.')

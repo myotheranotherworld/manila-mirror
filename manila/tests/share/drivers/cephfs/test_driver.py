@@ -53,6 +53,16 @@ class MockRadosModule(object):
         pass
 
 
+class MockAllocationCapacityCache(mock.Mock):
+    """Mocked up version of the rados module."""
+    def __init__(self, *args, **kwargs):
+        mock.Mock.__init__(self, spec=[
+            "update_data"
+        ])
+        self.is_expired = mock.Mock(return_value=False)
+        self.get_data = mock.Mock(return_value=20.0)
+
+
 class MockCephArgparseModule(object):
     """Mocked up version of the ceph_argparse module."""
 
@@ -61,6 +71,49 @@ class MockCephArgparseModule(object):
             mock.Mock.__init__(self, spec=[
                 "connect", "shutdown", "state"
             ])
+
+
+@ddt.ddt
+class AllocationCapacityCacheTestCase(test.TestCase):
+    """Test the Allocation capacity cache class.
+
+    This is a cache with a getter and a setter for the allocated capacity
+    cached value in the driver, also with a timeout control.
+    """
+
+    def setUp(self):
+        super(AllocationCapacityCacheTestCase, self).setUp()
+        timeout = 10
+        self._allocation_capacity_cache = driver.AllocationCapacityCache(
+            timeout
+        )
+
+    def test_set_get_data(self):
+        # Nothing set yet, info should be "expired"
+        self.assertTrue(
+            self._allocation_capacity_cache.is_expired()
+        )
+
+        # Class value starts with None
+        expected_allocated_capacity_gb = None
+        cached_allocated_capacity_gb = (
+            self._allocation_capacity_cache.get_data()
+        )
+        self.assertEqual(
+            cached_allocated_capacity_gb, expected_allocated_capacity_gb
+        )
+
+        # Set a new value and ensure it works properly
+        expected_allocated_capacity_gb = 100.0
+        self._allocation_capacity_cache.update_data(
+            expected_allocated_capacity_gb
+        )
+        cached_allocated_capacity_gb = (
+            self._allocation_capacity_cache.get_data()
+        )
+        self.assertEqual(
+            cached_allocated_capacity_gb, expected_allocated_capacity_gb
+        )
 
 
 @ddt.ddt
@@ -90,6 +143,8 @@ class CephFSDriverTestCase(test.TestCase):
         self.mock_object(driver, 'NativeProtocolHelper')
         self.mock_object(driver, 'NFSProtocolHelper')
         self.mock_object(driver, 'NFSClusterProtocolHelper')
+        self.mock_object(driver, "AllocationCapacityCache",
+                         MockAllocationCapacityCache)
 
         driver.ceph_default_target = ('mon-mgr', )
         self.fake_private_storage = mock.Mock()
@@ -101,6 +156,9 @@ class CephFSDriverTestCase(test.TestCase):
                                 configuration=self.fake_conf,
                                 private_storage=self.fake_private_storage))
         self._driver.protocol_helper = mock.Mock()
+        self._driver._cached_allocated_capacity_gb = (
+            MockAllocationCapacityCache()
+        )
 
         type(self._driver).volname = mock.PropertyMock(return_value='cephfs')
 
@@ -118,6 +176,10 @@ class CephFSDriverTestCase(test.TestCase):
             protocol_helper)
         self.fake_conf.set_default('cephfs_nfs_cluster_id',
                                    cephfs_nfs_cluster_id)
+        self.mock_object(
+            self._driver, '_get_cephfs_filesystem_allocation',
+            mock.Mock(return_value=10)
+        )
 
         self._driver.do_setup(self._context)
 
@@ -181,6 +243,11 @@ class CephFSDriverTestCase(test.TestCase):
     def test_version_check(self, ceph_mon_version, codename):
         driver.ceph_default_target = None
         driver.rados_command.return_value = ceph_mon_version
+
+        self.mock_object(
+            self._driver, '_get_cephfs_filesystem_allocation',
+            mock.Mock(return_value=10)
+        )
 
         self._driver.do_setup(self._context)
 
@@ -556,14 +623,15 @@ class CephFSDriverTestCase(test.TestCase):
         }
         add_rules = access_rules = [alice, ]
         delete_rules = []
+        update_rules = []
 
         self._driver.update_access(
             self._context, self._share, access_rules, add_rules, delete_rules,
-            None)
+            update_rules, None)
 
         self._driver.protocol_helper.update_access.assert_called_once_with(
             self._context, self._share, access_rules, add_rules, delete_rules,
-            share_server=None, sub_name=self._share['id'])
+            update_rules, share_server=None, sub_name=self._share['id'])
 
     def test_ensure_shares(self):
         self._driver.protocol_helper.reapply_rules_while_ensuring_shares = True
@@ -926,7 +994,61 @@ class CephFSDriverTestCase(test.TestCase):
         self.assertIsNone(self._driver._rados_client)
         del self._driver
 
-    def test_update_share_stats(self):
+    @ddt.data(
+        [21474836480, 293878, 97848372],
+        [21474836480, "infinite", 97848372],
+        ["infinite", "infinite", "infinite"],
+    )
+    def test__get_cephfs_filesystem_allocation(self, share_sizes):
+        subvolume_ls_args = {"vol_name": self._driver.volname}
+        rados_returns = []
+        rados_subvolume_list_result = []
+        subvolume_info_mock_calls = []
+        subvolume_names = []
+        expected_allocated_size_gb = 0
+
+        for idx, size in enumerate(share_sizes):
+            subvolume_name = f"subvolume{idx}"
+            subvolume_names.append(subvolume_name)
+            rados_returns.append({"bytes_quota": share_sizes[idx]})
+            rados_subvolume_list_result.append({"name": subvolume_name})
+            if size != "infinite":
+                expected_allocated_size_gb += size
+
+        if expected_allocated_size_gb > 0:
+            expected_allocated_size_gb = (
+                round(int(expected_allocated_size_gb) / units.Gi, 2)
+            )
+
+        # first call we make to rados is the subvolume ls
+        rados_returns.insert(0, rados_subvolume_list_result)
+        driver.rados_command.side_effect = rados_returns
+
+        allocated_size_gb = self._driver._get_cephfs_filesystem_allocation()
+
+        self.assertEqual(allocated_size_gb, expected_allocated_size_gb)
+        for name in subvolume_names:
+            subvolume_info_arg_dict = {
+                "vol_name": self._driver.volname,
+                "sub_name": name
+            }
+            subvolume_info_mock_calls.append(
+                mock.call(
+                    self._driver._rados_client,
+                    "fs subvolume info",
+                    subvolume_info_arg_dict, json_obj=True
+                )
+            )
+        driver.rados_command.assert_has_calls([
+            mock.call(
+                self._driver._rados_client,
+                "fs subvolume ls", subvolume_ls_args, json_obj=True),
+            *subvolume_info_mock_calls
+        ])
+
+    @ddt.data(True, False)
+    def test_update_share_stats(self, cache_expired):
+        allocated_capacity_gb = 20.0
         self._driver.get_configured_ip_versions = mock.Mock(return_value=[4])
         self._driver.configuration.local_conf.set_override(
             'reserved_share_percentage', 5)
@@ -934,6 +1056,17 @@ class CephFSDriverTestCase(test.TestCase):
             'reserved_share_from_snapshot_percentage', 2)
         self._driver.configuration.local_conf.set_override(
             'reserved_share_extend_percentage', 2)
+        self._driver._cached_allocated_capacity_gb.is_expired = mock.Mock(
+            return_value=cache_expired
+        )
+        self.mock_object(
+            self._driver, '_get_cephfs_filesystem_allocation',
+            mock.Mock(return_value=20.0)
+        )
+        self.mock_object(
+            self._driver, '_get_cephfs_filesystem_allocation',
+            mock.Mock(return_value=allocated_capacity_gb)
+        )
 
         self._driver._update_share_stats()
         result = self._driver._stats
@@ -944,9 +1077,17 @@ class CephFSDriverTestCase(test.TestCase):
             2, result['pools'][0]['reserved_share_extend_percentage'])
         self.assertEqual(164.94, result['pools'][0]['total_capacity_gb'])
         self.assertEqual(149.84, result['pools'][0]['free_capacity_gb'])
+        self.assertEqual(20.0, result['pools'][0]['allocated_capacity_gb'])
         self.assertTrue(result['ipv4_support'])
         self.assertFalse(result['ipv6_support'])
         self.assertEqual("CEPHFS", result['storage_protocol'])
+        if cache_expired:
+            self._driver._get_cephfs_filesystem_allocation.assert_called_once()
+            (self._driver._cached_allocated_capacity_gb
+             .update_data.assert_called_once_with(allocated_capacity_gb))
+        else:
+            (self._driver._cached_allocated_capacity_gb
+             .get_data.assert_called_once())
 
     @ddt.data('cephfs', 'nfs')
     def test_get_configured_ip_versions(self, protocol_helper):
@@ -1226,6 +1367,7 @@ class NativeProtocolHelperTestCase(test.TestCase):
             access_rules=[alice, manila, admin, dabo],
             add_rules=[alice, manila, admin, dabo],
             delete_rules=[bob],
+            update_rules=[],
             sub_name=self._share['id']
         )
 
@@ -1298,7 +1440,7 @@ class NativeProtocolHelperTestCase(test.TestCase):
 
         access_updates = self._native_protocol_helper.update_access(
             self._context, self._share, access_rules=[alice], add_rules=[],
-            delete_rules=[], sub_name=self._share['id'])
+            delete_rules=[], update_rules=[], sub_name=self._share['id'])
 
         self.assertEqual(
             {'accessid1': {'access_key': 'abc123'}}, access_updates)
@@ -1722,15 +1864,23 @@ class NFSClusterProtocolHelperTestCase(test.TestCase):
                           helper._get_export_ips)
 
     @ddt.data(constants.ACCESS_LEVEL_RW, constants.ACCESS_LEVEL_RO)
-    def test_allow_access_rw_ro(self, mode):
+    def test_allow_access_rw_ro_when_export_does_not_exist(self, mode):
+        export_info_prefix = "nfs export info"
         access_allow_prefix = "nfs export apply"
         nfs_clusterid = self._nfscluster_protocol_helper.nfs_clusterid
         volname = self._nfscluster_protocol_helper.volname
+
+        driver.rados_command.return_value = {}
 
         clients = {
             'access_type': mode,
             'addresses': ['10.0.0.1'],
             'squash': 'none'
+        }
+
+        export_info_dict = {
+            "cluster_id": nfs_clusterid,
+            "pseudo_path": "ganesha:/foo/bar",
         }
 
         access_allow_dict = {
@@ -1757,9 +1907,74 @@ class NFSClusterProtocolHelperTestCase(test.TestCase):
             self._share, clients, sub_name=self._share['id']
         )
 
-        driver.rados_command.assert_called_once_with(
-            self._rados_client,
-            access_allow_prefix, access_allow_dict, inbuf=inbuf)
+        driver.rados_command.assert_has_calls([
+            mock.call(self._rados_client,
+                      export_info_prefix,
+                      export_info_dict, json_obj=True),
+            mock.call(self._rados_client,
+                      access_allow_prefix,
+                      access_allow_dict, inbuf=inbuf)])
+
+        self.assertEqual(2, driver.rados_command.call_count)
+
+    @ddt.data(constants.ACCESS_LEVEL_RW, constants.ACCESS_LEVEL_RO)
+    def test_allow_access_rw_ro_when_export_exist(self, mode):
+        export_info_prefix = "nfs export info"
+        access_allow_prefix = "nfs export apply"
+        nfs_clusterid = self._nfscluster_protocol_helper.nfs_clusterid
+        volname = self._nfscluster_protocol_helper.volname
+
+        new_clients = {
+            'access_type': mode,
+            'addresses': ['10.0.0.2'],
+            'squash': 'none'
+        }
+
+        export_info_dict = {
+            "cluster_id": nfs_clusterid,
+            "pseudo_path": "ganesha:/foo/bar",
+        }
+
+        access_allow_dict = {
+            "cluster_id": nfs_clusterid,
+        }
+
+        export = {
+            "path": "ganesha:/foo/bar",
+            "cluster_id": nfs_clusterid,
+            "pseudo": "ganesha:/foo/bar",
+            "squash": "none",
+            "security_label": True,
+            "fsal": {
+                "name": "CEPH",
+                "User_Id": "nfs.user",
+                "fs_name": volname
+
+            },
+            "clients": {
+                'access_type': "ro",
+                'addresses': ['10.0.0.1'],
+                'squash': 'none'
+            }
+        }
+
+        driver.rados_command.return_value = export
+        export['clients'] = new_clients
+        inbuf = json.dumps(export).encode('utf-8')
+
+        self._nfscluster_protocol_helper._allow_access(
+            self._share, new_clients, sub_name=self._share['id']
+        )
+
+        driver.rados_command.assert_has_calls([
+            mock.call(self._rados_client,
+                      export_info_prefix,
+                      export_info_dict, json_obj=True),
+            mock.call(self._rados_client,
+                      access_allow_prefix,
+                      access_allow_dict, inbuf=inbuf)])
+
+        self.assertEqual(2, driver.rados_command.call_count)
 
     def test_deny_access(self):
         access_deny_prefix = "nfs export rm"
@@ -1948,6 +2163,10 @@ class CephFSDriverAltConfigTestCase(test.TestCase):
         self._driver = driver.CephFSDriver(execute=self._execute,
                                            configuration=self.fake_conf,
                                            rados_client=self._rados_client)
+        self.mock_object(
+            self._driver, '_get_cephfs_filesystem_allocation',
+            mock.Mock(return_value=10)
+        )
 
         type(self._driver).volname = mock.PropertyMock(return_value='cephfs')
 

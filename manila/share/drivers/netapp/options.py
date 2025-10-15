@@ -71,6 +71,59 @@ netapp_basicauth_opts = [
                      'specified in the netapp_login option.'),
                secret=True), ]
 
+netapp_certificateauth_opts = [
+    cfg.StrOpt('netapp_private_key_file',
+               sample_default='/path/to/private_key.key,',
+               regex=r'^/.+',
+               help=('For self signed certificate: This file contains the'
+                     ' private key associated with the self-signed'
+                     ' certificate. It is a sensitive file that should be'
+                     ' kept secure and protected. The private key is used to'
+                     ' sign the certificate and establish the authenticity'
+                     ' and integrity of the certificate during the'
+                     ' authentication process.'
+                     ' For ca verified certificate: This file contains the'
+                     ' private key associated with the certificate. It is'
+                     ' generated when creating the certificate signing'
+                     ' request (CSR) and should be kept secure and protected.'
+                     ' The private key is used to sign the CSR and later used'
+                     ' to establish secure connections and authenticate the'
+                     ' entity.')),
+    cfg.StrOpt('netapp_certificate_file',
+               sample_default='/path/to/certificate.pem',
+               regex=r'^/.+',
+               help=('For self signed certificate: This file contains the'
+                     ' self-signed digital certificate itself. It includes'
+                     ' information about the entity such as the common name'
+                     ' (e.g., domain name), organization details, validity'
+                     ' period, and public key. The certificate file is'
+                     ' generated based on the private key and is used by'
+                     ' clients or systems to verify the entity identity'
+                     ' during the authentication process.'
+                     ' For ca verified certificate: This file contains the'
+                     ' digital certificate issued by the trusted third-party'
+                     ' certificate authority (CA). It includes information'
+                     ' about the entity identity, public key, and the CA that'
+                     ' issued the certificate. The certificate file is used'
+                     ' by clients or systems to verify the authenticity and'
+                     ' integrity of the entity during the authentication'
+                     ' process.')),
+    cfg.StrOpt('netapp_ca_certificate_file',
+               sample_default='/path/to/ca_certificate.crt',
+               regex=r'^/.+',
+               help=('This is applicable only for ca verified certificate.'
+                     ' This file contains the public key certificate of'
+                     ' the trusted third-party certificate authority (CA) that'
+                     ' issued the certificate. It is used by clients or '
+                     ' systems to validate the authenticity of the certificate'
+                     ' presented by the entity. The CA certificate file'
+                     ' is typically pre-configured in the trust store'
+                     ' of clients or systems to establish trust in'
+                     ' certificates issued by that CA.')),
+    cfg.BoolOpt('netapp_certificate_host_validation',
+                default=False,
+                help=('Enable certificate verification')), ]
+
 netapp_provisioning_opts = [
     cfg.ListOpt('netapp_enabled_share_protocols',
                 default=['nfs3', 'nfs4.0'],
@@ -96,6 +149,9 @@ netapp_provisioning_opts = [
     cfg.StrOpt('netapp_lif_name_template',
                default='os_%(net_allocation_id)s',
                help='Logical interface (LIF) name template'),
+    cfg.StrOpt('netapp_identity_auth_token_path',
+               default='',
+               help='Path to interact with auth tokens'),
     cfg.StrOpt('netapp_aggregate_name_search_pattern',
                default='(.*)',
                help='Pattern for searching available aggregates '
@@ -107,6 +163,11 @@ netapp_provisioning_opts = [
     cfg.StrOpt('netapp_root_volume',
                default='root',
                help='Root volume name.'),
+    cfg.IntOpt('netapp_delete_retention_hours',
+               min=0,
+               default=12,
+               help='The number of hours that a deleted volume should be '
+                    'retained before the delete is completed.'),
     cfg.IntOpt('netapp_volume_snapshot_reserve_percent',
                min=0,
                max=90,
@@ -123,6 +184,10 @@ netapp_provisioning_opts = [
                     "affect new shares, which will have their snapshot "
                     "directory always visible, unless toggled by the share "
                     "type extra spec 'netapp:hide_snapdir'."),
+    cfg.ListOpt('netapp_volume_snapshot_policy_exceptions',
+                help='NetApp volume Snapshot policy names which will not '
+                     'be overriden by extra-specs.',
+                default=['ec2_backups']),
     cfg.StrOpt('netapp_snapmirror_policy_name_svm_template',
                help='NetApp SnapMirror policy name template for Storage '
                     'Virtual Machines (Vservers).',
@@ -198,6 +263,23 @@ netapp_provisioning_opts = [
                     'certificate created during the vserver creation.  This '
                     'option only applies when the option '
                     'driver_handles_share_servers is set to True.'),
+    cfg.BoolOpt('netapp_restrict_lif_creation_per_ha_pair',
+                default=False,
+                help='Prevent the creation of a share server if total number'
+                     ' of data LIFs on one node of HA pair, including those'
+                     ' that can be migrated in case of failure, exceeds the '
+                     'maximum data LIFs supported by the node. This option '
+                     'guarantees that, in the event of a node failure, the'
+                     ' partner node will be able to takeover all data LIFs.'),
+    cfg.BoolOpt('netapp_cifs_aes_encryption',
+                default=False,
+                help='This option enable/disable AES encryption for the share'
+                     ' server based on the parameter value (True/False).'),
+    cfg.BoolOpt('netapp_enable_logical_space_reporting',
+                default=False,
+                help='This option enables the logical space reporting on a '
+                     'newly created vserver and logical space accounting '
+                     'on newly created volumes on this vserver. ')
 ]
 
 netapp_cluster_opts = [
@@ -250,12 +332,6 @@ netapp_data_motion_opts = [
                     '"destination" host will be the one that will be '
                     'considered when creating a new replica, or promoting '
                     'a replica'),
-    cfg.IntOpt('netapp_snapmirror_last_transfer_size_limit',
-               min=512,
-               default=1024,  # One MB
-               help='This option set the last transfer size limit (in KB) '
-                    'of snapmirror to decide whether replica is in sync or '
-                    'out of sync.'),
     cfg.IntOpt('netapp_volume_move_cutover_timeout',
                min=0,
                default=3600,  # One Hour,
@@ -341,6 +417,7 @@ CONF.register_opts(netapp_proxy_opts)
 CONF.register_opts(netapp_connection_opts)
 CONF.register_opts(netapp_transport_opts)
 CONF.register_opts(netapp_basicauth_opts)
+CONF.register_opts(netapp_certificateauth_opts)
 CONF.register_opts(netapp_provisioning_opts)
 CONF.register_opts(netapp_support_opts)
 CONF.register_opts(netapp_data_motion_opts)

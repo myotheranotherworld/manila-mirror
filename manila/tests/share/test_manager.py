@@ -33,6 +33,7 @@ from manila.data import rpcapi as data_rpc
 from manila import db
 from manila.db.sqlalchemy import models
 from manila import exception
+from manila.keymgr import barbican as barbican_api
 from manila.message import message_field
 from manila import quota
 from manila.share import api
@@ -1992,7 +1993,7 @@ class ShareManagerTestCase(test.TestCase):
             self.share_manager.db, 'share_replica_update')
 
         self.share_manager._share_replica_update(
-            self.context, replica, share_id=replica['share_id'])
+            self.context, replica['id'], share_id=replica['share_id'])
 
         mock_db_update_call.assert_called_once_with(
             self.context, replica['id'],
@@ -2025,7 +2026,7 @@ class ShareManagerTestCase(test.TestCase):
             self.share_manager.db, 'share_replica_update')
 
         self.share_manager._share_replica_update(
-            self.context, replica, share_id=replica['share_id'])
+            self.context, replica['id'], share_id=replica['share_id'])
 
         mock_db_update_call.assert_called_once_with(
             self.context, replica['id'],
@@ -2068,8 +2069,8 @@ class ShareManagerTestCase(test.TestCase):
         self.mock_object(db, 'share_replica_get',
                          mock.Mock(return_value=replica))
 
-        self.share_manager._share_replica_update(self.context, replica,
-                                                 share_id=replica['share_id'])
+        self.share_manager._share_replica_update(
+            self.context, replica['id'], share_id=replica['share_id'])
 
         self.assertFalse(mock_debug_log.called)
         self.assertFalse(mock_warning_log.called)
@@ -2114,7 +2115,7 @@ class ShareManagerTestCase(test.TestCase):
                          mock.Mock(return_value=snapshot_instances))
 
         self.share_manager._share_replica_update(
-            self.context, replica, share_id=replica['share_id'])
+            self.context, replica['id'], share_id=replica['share_id'])
 
         if retval == constants.REPLICA_STATE_ACTIVE:
             self.assertEqual(1, mock_warning_log.call_count)
@@ -2136,13 +2137,12 @@ class ShareManagerTestCase(test.TestCase):
                 side_effect=exception.ShareReplicaNotFound(replica_id='fake')))
         self.mock_object(self.share_manager, '_get_share_server')
         driver_call = self.mock_object(
-            self.share_manager, '_share_replica_update')
+            self.share_manager.driver, 'update_replica_state')
 
-        self.assertRaises(
-            exception.ShareReplicaNotFound,
-            self.share_manager.update_share_replica,
-            self.context, replica, share_id=replica['share_id'])
+        retval = self.share_manager.update_share_replica(
+            self.context, replica['id'], share_id=replica['share_id'])
 
+        self.assertIsNone(retval)
         self.assertFalse(driver_call.called)
 
     def test_update_share_replica_replica(self):
@@ -2671,6 +2671,71 @@ class ShareManagerTestCase(test.TestCase):
             resource_id=fake_share['id'],
             detail=(
                 message_field.Detail.SHARE_NETWORK_PORT_QUOTA_LIMIT_EXCEEDED))
+
+    def test_create_share_instance_with_ip_address_generation_failure(self):
+        share_network = db_utils.create_share_network(id='fake_sn_id')
+        share_net_subnet = db_utils.create_share_network_subnet(
+            id='fake_sns_id', share_network_id=share_network['id']
+        )
+        share_type = db_utils.create_share_type()
+        fake_share = db_utils.create_share(
+            share_network_id=share_network['id'], size=1,
+            share_type_id=share_type['id'])
+        fake_metadata = {
+            'request_host': 'fake_host',
+            'share_type_id': 'fake_share_type_id',
+        }
+        fake_server = db_utils.create_share_server(
+            id='fake_srv_id', status=constants.STATUS_CREATING,
+            share_network_subnets=[share_net_subnet])
+
+        self.mock_object(self.share_manager, '_build_server_metadata',
+                         mock.Mock(return_value=fake_metadata))
+        self.mock_object(db, 'share_server_create',
+                         mock.Mock(return_value=fake_server))
+        self.mock_object(db, 'share_instance_update',
+                         mock.Mock(return_value=fake_share.instance))
+        self.mock_object(db, 'share_instance_get',
+                         mock.Mock(return_value=fake_share.instance))
+        self.mock_object(
+            db, 'share_network_subnets_get_all_by_availability_zone_id',
+            mock.Mock(return_value=[share_net_subnet]))
+        self.mock_object(manager.LOG, 'error')
+
+        def raise_manila_exception(*args, **kwargs):
+            raise exception.IpAddressGenerationFailureClient()
+
+        self.mock_object(self.share_manager, '_setup_server',
+                         mock.Mock(side_effect=raise_manila_exception))
+
+        self.assertRaises(
+            exception.IpAddressGenerationFailureClient,
+            self.share_manager.create_share_instance,
+            self.context,
+            fake_share.instance['id'],
+        )
+        db.share_server_create.assert_called_once_with(
+            utils.IsAMatcher(context.RequestContext), mock.ANY)
+        db.share_instance_update.assert_has_calls([
+            mock.call(
+                utils.IsAMatcher(context.RequestContext),
+                fake_share.instance['id'],
+                {'status': constants.STATUS_ERROR},
+            )
+        ])
+        self.share_manager._setup_server.assert_called_once_with(
+            utils.IsAMatcher(context.RequestContext), fake_server,
+            fake_metadata)
+        manager.LOG.error.assert_called_with(mock.ANY,
+                                             fake_share.instance['id'])
+        self.share_manager.message_api.create.assert_called_once_with(
+            utils.IsAMatcher(context.RequestContext),
+            message_field.Action.CREATE,
+            str(fake_share.project_id),
+            resource_type=message_field.Resource.SHARE,
+            resource_id=fake_share['id'],
+            detail=(
+                message_field.Detail.NEUTRON_SUBNET_FULL))
 
     def test_create_share_instance_with_share_network_server_fail(self):
         share_network = db_utils.create_share_network(id='fake_sn_id')
@@ -3297,7 +3362,80 @@ class ShareManagerTestCase(test.TestCase):
         )
         driver_method_mock.assert_called_once_with(
             self.context, [fake_share_server], share.instance,
-            snapshot=None, share_group=None)
+            snapshot=None, share_group=None, encryption_key_ref=None)
+
+    @ddt.data(True, False)
+    def test_provide_share_server_encryption_key_ref(self, acl_error):
+        fake_share_network = db_utils.create_share_network(id='fake_sn_id')
+        fake_share_net_subnets = [db_utils.create_share_network_subnet(
+            id='fake_sns_id', share_network_id=fake_share_network['id']
+        )]
+
+        fake_share_server = db_utils.create_share_server(
+            id='fake',
+            encryption_key_ref='fake_ref'
+        )
+        share = db_utils.create_share(encryption_key_ref='fake_ref')
+
+        self.share_manager.driver.encryption_support = 'share_server'
+
+        db_method_mock = self.mock_object(
+            db, 'share_network_subnets_get_all_by_availability_zone_id',
+            mock.Mock(return_value=fake_share_net_subnets))
+        self.mock_object(
+            db, 'share_server_get_all_by_host_and_share_subnet_valid',
+            mock.Mock(return_value=[fake_share_server]))
+        self.mock_object(
+            self.share_manager, '_check_share_server_backend_limits',
+            mock.Mock(return_value=[fake_share_server]))
+        self.mock_object(
+            self.share_manager.driver,
+            "choose_share_server_compatible_with_share",
+            mock.Mock(return_value=None)
+        )
+        mock_server_create = self.mock_object(
+            db, 'share_server_create',
+            mock.Mock(return_value=fake_share_server))
+        fake_exception = exception.ManilaBarbicanACLError()
+        self.mock_object(
+            barbican_api, 'create_secret_access',
+            mock.Mock(side_effect=fake_exception) if acl_error else
+            mock.Mock())
+
+        mock_obj = mock.Mock()
+        mock_obj.to_dict.return_value = {
+            'id': 'fake_application_credential_id'
+        }
+        mock_create_app_cred = self.mock_object(
+            barbican_api, 'create_application_credentials',
+            mock.Mock(return_value=mock_obj))
+        mock_get_secret_ref = self.mock_object(
+            barbican_api, 'get_secret_href',
+            mock.Mock(return_value='fake_secret_href'))
+
+        if acl_error:
+            self.assertRaises(
+                exception.ManilaBarbicanACLError,
+                self.share_manager._provide_share_server_for_share,
+                self.context, fake_share_network['id'], share.instance)
+        else:
+            self.share_manager._provide_share_server_for_share(
+                self.context, fake_share_network['id'], share.instance)
+            mock_server_create.assert_called()
+            mock_create_app_cred.assert_called()
+            mock_get_secret_ref.assert_called()
+
+        db_method_mock.assert_called_once_with(
+            self.context, fake_share_network['id'],
+            availability_zone_id=share.instance.get('availability_zone_id')
+        )
+        driver_mock = self.share_manager.driver
+        driver_method_mock = (
+            driver_mock.choose_share_server_compatible_with_share
+        )
+        driver_method_mock.assert_called_once_with(
+            self.context, [fake_share_server], share.instance,
+            snapshot=None, share_group=None, encryption_key_ref='fake_ref')
 
     def test_provide_share_server_for_share_invalid_arguments(self):
         self.assertRaises(ValueError,
@@ -3469,6 +3607,7 @@ class ShareManagerTestCase(test.TestCase):
             'status': constants.STATUS_CREATING,
             'security_service_update_support': False,
             'network_allocation_update_support': False,
+            'share_replicas_migration_support': False,
         }
         fake_metadata = {
             'migration_destination': True,
@@ -4665,7 +4804,7 @@ class ShareManagerTestCase(test.TestCase):
                           self.share_manager._validate_segmentation_id,
                           network_info)
 
-    @ddt.data(10, 36, 60)
+    @ddt.data(10, 36, 720)
     def test_verify_server_cleanup_interval_valid_cases(self, val):
         data = dict(DEFAULT=dict(unused_share_server_cleanup_interval=val))
         with test_utils.create_temp_config_with_opts(data):
@@ -7500,7 +7639,8 @@ class ShareManagerTestCase(test.TestCase):
             utils.IsAMatcher(context.RequestContext), fake_share_server['id'],
             {'status': constants.STATUS_ACTIVE,
              'identifier': driver_return[0] or share_server['id'],
-             'network_allocation_update_support': False}
+             'network_allocation_update_support': False,
+             'share_replicas_migration_support': False}
         )
         mock_set_backend_details.assert_called_once_with(
             utils.IsAMatcher(context.RequestContext), share_server['id'],
@@ -9085,10 +9225,11 @@ class ShareManagerTestCase(test.TestCase):
 
     def test__build_server_metadata(self):
         share = {'host': 'host', 'share_type_id': 'id'}
-        expected_metadata = {'request_host': 'host', 'share_type_id': 'id'}
+        expected_metadata = {'request_host': 'host', 'share_type_id': 'id',
+                             'encryption_key_ref': None, 'keystone_url': None}
 
         metadata = self.share_manager._build_server_metadata(
-            share['host'], share['share_type_id'])
+            self.context, share['host'], share['share_type_id'])
 
         self.assertDictEqual(expected_metadata, metadata)
 
@@ -10173,8 +10314,17 @@ class ShareManagerTestCase(test.TestCase):
             self.context, fake_share_network['id'])
         mock_subnet_get.assert_called_once_with(
             self.context, fake_dest_share_server['id'])
-        mock_allocations_get.assert_called_once_with(
-            self.context, fake_dest_share_server['id'])
+
+        if need_network_allocation:
+            mock_allocations_get.assert_called_once_with(
+                self.context, fake_dest_share_server['id'])
+        else:
+            mock_allocations_get.assert_has_calls(
+                calls=[
+                    mock.call(self.context, fake_dest_share_server['id']),
+                    mock.call(self.context, fake_source_share_server['id']),
+                ]
+            )
 
         if not need_network_allocation:
             mock_form_server_setup_info.assert_called_once_with(
@@ -11001,7 +11151,7 @@ class ShareManagerTestCase(test.TestCase):
         server = {'id': server_id}
         mock_servers_get = self.mock_object(
             self.share_manager.db,
-            'share_server_get_all_by_host_and_share_subnet',
+            'share_server_get_all_by_host_and_or_share_subnet',
             mock.Mock(return_value=[server]))
         current_network_allocations = 'fake_current_net_allocations'
         mock_form_net_allocations = self.mock_object(
@@ -11037,7 +11187,8 @@ class ShareManagerTestCase(test.TestCase):
             self.context, net_id, new_subnet['availability_zone_id'],
             fallback_to_default=False)
         mock_servers_get.assert_called_once_with(
-            self.context, self.share_manager.host, new_share_network_subnet_id)
+            self.context, host=self.share_manager.host,
+            share_subnet_id=new_share_network_subnet_id)
         mock_form_net_allocations.assert_called_once_with(
             self.context, server['id'], subnets)
         mock_instances_get.assert_called_once_with(
@@ -11071,7 +11222,7 @@ class ShareManagerTestCase(test.TestCase):
         server = {'id': server_id}
         mock_servers_get = self.mock_object(
             self.share_manager.db,
-            'share_server_get_all_by_host_and_share_subnet',
+            'share_server_get_all_by_host_and_or_share_subnet',
             mock.Mock(return_value=[server]))
         current_network_allocations = 'fake_current_net_allocations'
         mock_form_net_allocations = self.mock_object(
@@ -11113,7 +11264,8 @@ class ShareManagerTestCase(test.TestCase):
             self.context, net_id, new_subnet['availability_zone_id'],
             fallback_to_default=False)
         mock_servers_get.assert_called_once_with(
-            self.context, self.share_manager.host, new_share_network_subnet_id)
+            self.context, host=self.share_manager.host,
+            share_subnet_id=new_share_network_subnet_id)
         mock_form_net_allocations.assert_called_once_with(
             self.context, server['id'], subnets)
         mock_instances_get.assert_called_once_with(
@@ -11131,6 +11283,64 @@ class ShareManagerTestCase(test.TestCase):
             share_instance_ids=['fake_id'], snapshot_instance_ids=['fake_id'])
         mock_check_update_finished.assert_called_once_with(
             self.context, share_network_id=net_id)
+
+    def test_update_share_network_subnet_from_metadata(self):
+        share_server = fakes.fake_share_server_get()
+        share_network = db_utils.create_share_network(id='fake_sn_id')
+        share_net_subnet = db_utils.create_share_network_subnet(
+            id='fake_sns_id', share_network_id=share_network['id']
+        )
+
+        self.mock_object(
+            self.share_manager.db, 'share_server_get',
+            mock.Mock(return_value=share_server))
+        self.mock_object(
+            self.share_manager.db, 'share_network_get',
+            mock.Mock(return_value=share_network))
+        self.mock_object(
+            self.share_manager.db, 'share_network_subnet_get',
+            mock.Mock(return_value=share_net_subnet))
+
+        metadata = {'showmount': 'true'}
+        mock_update = self.mock_object(
+            self.share_manager.driver,
+            'update_share_network_subnet_from_metadata')
+
+        self.share_manager.update_share_network_subnet_from_metadata(
+            self.context, share_network['id'],
+            share_net_subnet['id'], share_server['id'], metadata)
+
+        mock_update.assert_called_once_with(
+            self.context, share_network, share_net_subnet,
+            share_server, metadata)
+        self.share_manager.message_api.create.assert_called_once_with(
+            utils.IsAMatcher(context.RequestContext),
+            message_field.Action.UPDATE_METADATA,
+            share_network['project_id'],
+            resource_type=message_field.Resource.SHARE_NETWORK_SUBNET,
+            resource_id=share_net_subnet['id'],
+            detail=message_field.Detail.UPDATE_METADATA_SUCCESS)
+
+    def test_restore_backup_respects_restore_to_target(self):
+        target_share = db_utils.create_share(status=constants.STATUS_AVAILABLE)
+        share = db_utils.create_share(status=constants.STATUS_AVAILABLE)
+        backup = db_utils.create_backup(
+            share['id'], status=constants.STATUS_AVAILABLE, size=2)
+        target_share_id = target_share['id']
+
+        self.mock_object(self.share_manager.driver, 'restore_backup')
+        self.mock_object(self.share_manager.db, 'share_get',
+                         mock.Mock(return_value=target_share))
+        self.mock_object(self.share_manager, '_get_share_instance',
+                         mock.Mock(return_value=target_share['instance']))
+
+        with mock.patch.object(self.share_manager.driver,
+                               'restore_to_target_support', False):
+            self.assertRaises(
+                exception.BackupException,
+                self.share_manager.restore_backup,
+                self.context, backup, target_share_id)
+            self.share_manager.driver.restore_backup.assert_not_called()
 
 
 @ddt.ddt

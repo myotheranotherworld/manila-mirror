@@ -42,7 +42,7 @@ EMC_NAS_OPTS = [
                 help='Use secure connection to server.'),
     cfg.StrOpt('emc_share_backend',
                ignore_case=True,
-               choices=['isilon', 'vnx', 'unity', 'powermax',
+               choices=['powerscale', 'isilon', 'vnx', 'unity', 'powermax',
                         'powerstore', 'powerflex'],
                help='Share backend.'),
     cfg.StrOpt('emc_nas_root_dir',
@@ -81,6 +81,11 @@ class EMCShareDriver(driver.ShareDriver):
         if self.backend_name == 'vnx':
             LOG.warning('Dell EMC VNX share driver has been deprecated and is '
                         'expected to be removed in a future release.')
+        if self.backend_name == 'isilon':
+            self.backend_name = 'powerscale'
+            LOG.warning('Dell EMC isilon share driver has been deprecated and '
+                        'is renamed to powerscale. It is expected '
+                        'to be removed in a future release.')
         self.plugin = self.plugin_manager.load_plugin(
             self.backend_name,
             configuration=self.configuration)
@@ -91,52 +96,24 @@ class EMCShareDriver(driver.ShareDriver):
         self.dhss_mandatory_security_service_association = (
             self.plugin.dhss_mandatory_security_service_association)
 
-        if hasattr(self.plugin, 'ipv6_implemented'):
-            self.ipv6_implemented = self.plugin.ipv6_implemented
+        self.ipv6_implemented = getattr(self.plugin, 'ipv6_implemented', False)
 
-        if hasattr(self.plugin, 'revert_to_snap_support'):
-            self.revert_to_snap_support = self.plugin.revert_to_snap_support
-        else:
-            self.revert_to_snap_support = False
-
-        if hasattr(self.plugin, 'shrink_share_support'):
-            self.shrink_share_support = self.plugin.shrink_share_support
-        else:
-            self.shrink_share_support = False
-
-        if hasattr(self.plugin, 'manage_existing_support'):
-            self.manage_existing_support = self.plugin.manage_existing_support
-        else:
-            self.manage_existing_support = False
-
-        if hasattr(self.plugin, 'manage_existing_with_server_support'):
-            self.manage_existing_with_server_support = (
-                self.plugin.manage_existing_with_server_support)
-        else:
-            self.manage_existing_with_server_support = False
-
-        if hasattr(self.plugin, 'manage_existing_snapshot_support'):
-            self.manage_existing_snapshot_support = (
-                self.plugin.manage_existing_snapshot_support)
-        else:
-            self.manage_existing_snapshot_support = False
-
-        if hasattr(self.plugin, 'manage_snapshot_with_server_support'):
-            self.manage_snapshot_with_server_support = (
-                self.plugin.manage_snapshot_with_server_support)
-        else:
-            self.manage_snapshot_with_server_support = False
-
-        if hasattr(self.plugin, 'manage_server_support'):
-            self.manage_server_support = self.plugin.manage_server_support
-        else:
-            self.manage_server_support = False
-
-        if hasattr(self.plugin, 'get_share_server_network_info_support'):
-            self.get_share_server_network_info_support = (
-                self.plugin.get_share_server_network_info_support)
-        else:
-            self.get_share_server_network_info_support = False
+        self.revert_to_snap_support = getattr(
+            self.plugin, 'revert_to_snap_support', False)
+        self.shrink_share_support = getattr(
+            self.plugin, 'shrink_share_support', False)
+        self.manage_existing_support = getattr(
+            self.plugin, 'manage_existing_support', False)
+        self.manage_existing_with_server_support = getattr(
+            self.plugin, 'manage_existing_with_server_support', False)
+        self.manage_existing_snapshot_support = getattr(
+            self.plugin, 'manage_existing_snapshot_support', False)
+        self.manage_snapshot_with_server_support = getattr(
+            self.plugin, 'manage_snapshot_with_server_support', False)
+        self.manage_server_support = getattr(
+            self.plugin, 'manage_server_support', False)
+        self.get_share_server_network_info_support = getattr(
+            self.plugin, 'get_share_server_network_info_support', False)
 
     def manage_existing(self, share, driver_options):
         """manage an existing share"""
@@ -257,7 +234,7 @@ class EMCShareDriver(driver.ShareDriver):
         self.plugin.deny_access(context, share, access, share_server)
 
     def update_access(self, context, share, access_rules, add_rules,
-                      delete_rules, share_server=None):
+                      delete_rules, update_rules, share_server=None):
         """Update access to the share."""
         return self.plugin.update_access(context, share, access_rules,
                                          add_rules, delete_rules, share_server)
@@ -321,3 +298,15 @@ class EMCShareDriver(driver.ShareDriver):
         if hasattr(self.plugin, 'get_default_filter_function'):
             return self.plugin.get_default_filter_function()
         return None
+
+    def get_backend_info(self, context):
+        """Get driver and array configuration parameters."""
+        if hasattr(self.plugin, 'get_backend_info'):
+            return self.plugin.get_backend_info(context)
+        raise NotImplementedError()
+
+    def ensure_shares(self, context, shares):
+        """Invoked to ensure that shares are exported."""
+        if hasattr(self.plugin, 'ensure_shares'):
+            return self.plugin.ensure_shares(context, shares)
+        raise NotImplementedError()

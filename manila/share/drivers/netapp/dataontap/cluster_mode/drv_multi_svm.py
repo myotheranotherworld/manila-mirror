@@ -40,11 +40,16 @@ class NetAppCmodeMultiSvmShareDriver(driver.ShareDriver):
         self.security_service_update_support = True
         self.dhss_mandatory_security_service_association = {
             'nfs': None,
-            'cifs': ['active_directory', ]
+            #'cifs': ['active_directory', ]
+            'cifs': None
         }
         # NetApp driver supports multiple subnets including update existing
         # share servers.
         self.network_allocation_update_support = True
+        self.share_replicas_migration_support = True
+        # NetApp driver supports share server encryption and enables encryption
+        # on the created share.
+        self.encryption_support = ["share_server"]
 
     def do_setup(self, context):
         self.library.do_setup(context)
@@ -110,9 +115,9 @@ class NetAppCmodeMultiSvmShareDriver(driver.ShareDriver):
         self.library.unmanage_snapshot(snapshot, share_server=share_server)
 
     def update_access(self, context, share, access_rules, add_rules,
-                      delete_rules, **kwargs):
+                      delete_rules, update_rules, **kwargs):
         self.library.update_access(context, share, access_rules, add_rules,
-                                   delete_rules, **kwargs)
+                                   delete_rules, update_rules, **kwargs)
 
     def _update_share_stats(self, data=None):
         data = self.library.get_share_stats(
@@ -331,10 +336,12 @@ class NetAppCmodeMultiSvmShareDriver(driver.ShareDriver):
 
     def choose_share_server_compatible_with_share(self, context, share_servers,
                                                   share, snapshot=None,
-                                                  share_group=None):
+                                                  share_group=None,
+                                                  encryption_key_ref=None):
         return self.library.choose_share_server_compatible_with_share(
             context, share_servers, share, snapshot=snapshot,
-            share_group=share_group)
+            share_group=share_group,
+            encryption_key_ref=encryption_key_ref)
 
     def choose_share_server_compatible_with_share_group(
             self, context, share_servers, share_group_ref,
@@ -403,3 +410,11 @@ class NetAppCmodeMultiSvmShareDriver(driver.ShareDriver):
                                    share_server=None):
         self.library.update_share_from_metadata(
             context, share, metadata, share_server=share_server)
+
+    def update_share_network_subnet_from_metadata(self, context,
+                                                  share_network,
+                                                  share_network_subnet,
+                                                  share_server, metadata):
+        self.library.update_share_network_subnet_from_metadata(
+            context, share_network, share_network_subnet,
+            share_server, metadata)

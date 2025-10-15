@@ -94,7 +94,7 @@ class VASTShareDriverTestCase(unittest.TestCase):
         self.assertFalse(session.ssl_verify)
         self.assertEqual(session.base_url, "https://test:443/api")
 
-    @ddt.data("vast_mgmt_user", "vast_vippool_name")
+    @ddt.data("vast_mgmt_user", "vast_vippool_name", "vast_mgmt_host")
     def test_do_setup_missing_required_fields(self, missing_field):
         self.fake_conf.set_default(missing_field, None)
         _driver = driver.VASTShareDriver(
@@ -102,6 +102,16 @@ class VASTShareDriverTestCase(unittest.TestCase):
         )
         with self.assertRaises(exception.VastDriverException):
             _driver.do_setup(self._context)
+
+    def test_do_setup_with_api_token(self):
+        self.fake_conf.set_default("vast_mgmt_user", None)
+        self.fake_conf.set_default("vast_mgmt_password", None)
+        self.fake_conf.set_default("vast_api_token", "test_token")
+        _driver = driver.VASTShareDriver(
+            execute=mock.MagicMock(), configuration=self.fake_conf
+        )
+        _driver.do_setup(self._context)
+        self.assertEqual(_driver.rest.session.token, "test_token")
 
     @mock.patch(
         "manila.share.drivers.vastdata.rest.Session.get",
@@ -192,12 +202,18 @@ class VASTShareDriverTestCase(unittest.TestCase):
                 mock_rest.views.ensure.assert_called_once_with(
                     name="fakeid", path="/fake/manila-fakeid", policy_id=1
                 )
-                self.assertDictEqual(
+                self.assertListEqual(
                     location,
-                    {
-                        'path': '1.1.1.0:/fake/manila-fakeid',
-                        'is_admin_only': False
-                    }
+                    [
+                        {
+                            'path': '1.1.1.0:/fake/manila-fakeid',
+                            'is_admin_only': False
+                        },
+                        {
+                            'path': '1.1.1.1:/fake/manila-fakeid',
+                            'is_admin_only': False
+                        },
+                    ]
                 )
                 if not policy:
                     mock_rest.views.update.assert_called_once_with(
@@ -232,6 +248,7 @@ class VASTShareDriverTestCase(unittest.TestCase):
             share,
             access_rules,
             None,
+            None,
             None
         )
         self.assertIsNone(res)
@@ -250,7 +267,7 @@ class VASTShareDriverTestCase(unittest.TestCase):
         with mock.patch.object(self._driver, "rest", mock_rest):
             with self.assertRaises(exception.ManilaException) as exc:
                 self._driver.update_access(
-                    self._context, share, access_rules, None, None
+                    self._context, share, access_rules, None, None, None
                 )
             self.assertIn("Policy not found", str(exc.exception))
 
@@ -278,6 +295,7 @@ class VASTShareDriverTestCase(unittest.TestCase):
                 self._context,
                 share,
                 access_rules,
+                None,
                 None,
                 None
             )
@@ -312,6 +330,7 @@ class VASTShareDriverTestCase(unittest.TestCase):
                 self._context,
                 share,
                 access_rules,
+                None,
                 None,
                 None
             )
@@ -354,6 +373,7 @@ class VASTShareDriverTestCase(unittest.TestCase):
                 None,
                 None,
                 delete_rules,
+                None,
             )
 
         expected_ro = set(ro)
@@ -383,7 +403,7 @@ class VASTShareDriverTestCase(unittest.TestCase):
         ]
         with mock.patch.object(self._driver, "rest", mock_rest):
             failed_rules = self._driver.update_access(
-                self._context, share, None, None, delete_rules
+                self._context, share, None, None, delete_rules, None
             )
 
         expected_rw = set(rw)
@@ -418,6 +438,7 @@ class VASTShareDriverTestCase(unittest.TestCase):
                 self._context,
                 share,
                 access_rules,
+                None,
                 None,
                 None
             )
@@ -463,6 +484,7 @@ class VASTShareDriverTestCase(unittest.TestCase):
                 None,
                 None,
                 delete_rules,
+                None
             )
             kw = mock_rest.view_policies.update.call_args.kwargs
             self.assertEqual(kw["name"], "fakeid")
@@ -514,6 +536,7 @@ class VASTShareDriverTestCase(unittest.TestCase):
                 self._context,
                 share,
                 access_rules,
+                None,
                 None,
                 None
             )

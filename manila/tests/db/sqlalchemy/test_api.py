@@ -597,10 +597,20 @@ class ShareDatabaseAPITestCase(test.TestCase):
 
     def test_share_instance_get_all_by_host_not_found_exception(self):
         db_utils.create_share()
-        self.mock_object(db_api, '_share_get', mock.Mock(
-                         side_effect=exception.NotFound))
         instances = db_api.share_instance_get_all_by_host(
-            self.ctxt, 'fake_host', True)
+            self.ctxt, 'not_found_host', True)
+
+        self.assertEqual(0, len(instances))
+
+    @ddt.data(
+        {'status': constants.STATUS_AVAILABLE},
+        {'status': None})
+    @ddt.unpack
+    def test_share_instance_get_all_by_host_no_instance(self, status):
+        db_utils.create_share_without_instance()
+        instances = db_api.share_instance_get_all_by_host(
+            self.ctxt, "fake_host", with_share_data=True, status=status
+        )
 
         self.assertEqual(0, len(instances))
 
@@ -898,6 +908,28 @@ class ShareDatabaseAPITestCase(test.TestCase):
         results = db_api.share_get_all(self.ctxt, filters=filters)
 
         self.assertEqual(len(share_values), len(results))
+
+    @ddt.data(
+        ('display_name~', 'display_name',
+         ['fake_name_1', 'fake_name_2', 'fake_name_%'], '%'),
+        ('display_description~', 'display_description',
+         ['fake desc 1', 'fake desc 2', 'fake desc %'], '%')
+    )
+    @ddt.unpack
+    def test_share_get_all_like_filters_with_percent_sign(
+            self, filter_name, key, share_values, like_value):
+        for value in share_values:
+            kwargs = {key: value}
+            db_utils.create_share(**kwargs)
+        db_utils.create_share(
+            display_name='irrelevant_name',
+            display_description='should not be queried')
+
+        filters = {filter_name: like_value}
+
+        results = db_api.share_get_all(self.ctxt, filters=filters)
+
+        self.assertEqual(1, len(results))
 
     @ddt.data(None, 'writable')
     def test_share_get_has_replicas_field(self, replication_type):
@@ -3831,7 +3863,7 @@ class ShareServerDatabaseAPITestCase(test.TestCase):
         invalid = db_utils.create_share_server(**invalid)
         other = db_utils.create_share_server(**other)
 
-        servers = db_api.share_server_get_all_by_host_and_share_subnet(
+        servers = db_api.share_server_get_all_by_host_and_or_share_subnet(
             self.ctxt,
             host='host1',
             share_subnet_id='1')
@@ -3845,7 +3877,7 @@ class ShareServerDatabaseAPITestCase(test.TestCase):
     def test_get_all_by_host_and_share_subnet_not_found(self):
         self.assertRaises(
             exception.ShareServerNotFound,
-            db_api.share_server_get_all_by_host_and_share_subnet,
+            db_api.share_server_get_all_by_host_and_or_share_subnet,
             self.ctxt, host='fake', share_subnet_id='fake'
         )
 
@@ -4061,6 +4093,13 @@ class ShareServerDatabaseAPITestCase(test.TestCase):
 
         for ss in share_servers:
             self.assertEqual(constants.STATUS_NETWORK_CHANGE, ss['status'])
+
+    def test_encryption_keys_get_count(self):
+        servers = [db_utils.create_share_server(
+                   encryption_key_ref=uuidutils.generate_uuid())
+                   for __ in range(1, 4)]
+        count = db_api.encryption_keys_get_count(context.get_admin_context())
+        self.assertEqual(count, len(servers))
 
 
 class ServiceDatabaseAPITestCase(test.TestCase):

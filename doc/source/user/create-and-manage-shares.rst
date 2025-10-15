@@ -63,6 +63,10 @@ important terms:
 +------------------------------------+-------------------------+---------------------------------------------------------+
 | mount_point_name_support           | true or false           | share can or cannot have customized export location     |
 +------------------------------------+-------------------------+---------------------------------------------------------+
+| encryption_support                 | share                   | share is encrypted with share encryption key            |
+|                                    +-------------------------+---------------------------------------------------------+
+|                                    | share_server            | share is encrypted with share server encryption key     |
++------------------------------------+-------------------------+---------------------------------------------------------+
 | provisioning:mount_point_prefix    | string                  | prefix used for custom export location                  |
 +------------------------------------+-------------------------+---------------------------------------------------------+
 
@@ -136,7 +140,7 @@ Share types
 
   .. code-block:: console
 
-     $ manila type-list
+     $ openstack share type list
      +--------------------------------------+-----------------------------------+------------+------------+--------------------------------------+--------------------------------------------+---------------------------------------------------------+
      | ID                                   | Name                              | visibility | is_default | required_extra_specs                 | optional_extra_specs                       | Description                                             |
      +--------------------------------------+-----------------------------------+------------+------------+--------------------------------------+--------------------------------------------+---------------------------------------------------------+
@@ -505,6 +509,58 @@ Create a share
     +---------------------------------------+-------------------------------------------------------------------------+
 
 
+* Create a share using encryption key reference.
+
+  User can create share using their own encryption key. The key must be stored
+  in key-manager (Openstack Barbican) service. First create share type and
+  specify extra-spec ``encryption_support``. It can have value ``share`` or
+  ``share_server`` based on support by backend storage driver. Then use
+  `--encryption-key-ref` option in share create command. Users can use
+  encryption key reference or UUID of key reference here.
+
+  .. code-block:: console
+
+     $ openstack share create NFS 1 \
+         --name myshare3 \
+         --description "My Manila share - Encrypted" \
+         --share-network mysharenetwork \
+         --share-type encrypted_share_type \
+         --encryption-key-ref 86babe9b-7277-4c3a-a081-6eb3eac9231d
+
+     +---------------------------------------+-----------------------------------------------------------------------+
+     | Property                              | Value                                                                 |
+     +---------------------------------------+-----------------------------------------------------------------------+
+     | id                                    | 40de4f4c-4588-4d9c-844b-f74d8951053a                                  |
+     | size                                  | 1                                                                     |
+     | availability_zone                     | None                                                                  |
+     | created_at                            | 2020-08-07T05:24:14.000000                                            |
+     | status                                | creating                                                              |
+     | name                                  | myshare3                                                              |
+     | description                           | My Manila share - Encrypted                                           |
+     | project_id                            | d9932a60d9ee4087b6cff9ce6e9b4e3b                                      |
+     | snapshot_id                           | None                                                                  |
+     | share_network_id                      | c4bfdd5e-7502-4a65-8876-0ce8b9914a64                                  |
+     | share_proto                           | NFS                                                                   |
+     | metadata                              | {}                                                                    |
+     | share_type                            | af7b64ec-cdb3-4a5f-93c9-51672d72e172                                  |
+     | is_public                             | False                                                                 |
+     | snapshot_support                      | True                                                                  |
+     | task_state                            | None                                                                  |
+     | share_type_name                       | encrypted_share_type                                                  |
+     | access_rules_status                   | active                                                                |
+     | replication_type                      | None                                                                  |
+     | has_replicas                          | False                                                                 |
+     | user_id                               | 2cebd96a794f431caa06ce5215e0da21                                      |
+     | create_share_from_snapshot_support    | True                                                                  |
+     | revert_to_snapshot_support            | True                                                                  |
+     | share_group_id                        | None                                                                  |
+     | encryption_key_ref                    | 86babe9b-7277-4c3a-a081-6eb3eac9231d                                  |
+     | source_share_group_snapshot_member_id | None                                                                  |
+     | mount_snapshot_support                | True                                                                  |
+     | progress                              | None                                                                  |
+     +---------------------------------------+-----------------------------------------------------------------------+
+
+
 Grant and revoke share access
 -----------------------------
 
@@ -694,33 +750,78 @@ Create snapshot
 
   .. code-block:: console
 
-     $ manila snapshot-create --name mysnapshot --description "My Manila snapshot" myshare
-     +-------------+--------------------------------------+
-     | Property    | Value                                |
-     +-------------+--------------------------------------+
-     | id          | 8a18aa77-7500-4e56-be8f-6081146f47f1 |
-     | share_id    | 83b0772b-00ad-4e45-8fad-106b9d4f1719 |
-     | share_size  | 1                                    |
-     | created_at  | 2020-08-07T05:30:26.649430           |
-     | status      | creating                             |
-     | name        | mysnapshot                           |
-     | description | My Manila snapshot                   |
-     | size        | 1                                    |
-     | share_proto | NFS                                  |
-     | user_id     | 2cebd96a794f431caa06ce5215e0da21     |
-     | project_id  | d9932a60d9ee4087b6cff9ce6e9b4e3b     |
-     +-------------+--------------------------------------+
+     $ openstack share snapshot create --name mysnap --description "My Manila snapshot" myshare
+    +-------------------+--------------------------------------+
+    | Field             | Value                                |
+    +-------------------+--------------------------------------+
+    | id                | 286edbe1-a69e-40e7-ad50-61287570df55 |
+    | share_id          | bf7ffbb7-73a5-44fe-a93e-73cbd5a9197d |
+    | share_size        | 1                                    |
+    | created_at        | 2025-03-08T00:06:32.123637           |
+    | status            | creating                             |
+    | name              | mysnap                               |
+    | description       | My Manila snapshot                   |
+    | size              | 1                                    |
+    | share_proto       | NFS                                  |
+    | provider_location | None                                 |
+    | user_id           | 64e1409650ee4e94a8e78df24da86091     |
+    | project_id        | dd43995fee324b24b79adab2542d74e9     |
+    | metadata          | {}                                   |
+    +-------------------+--------------------------------------+
 
 * List snapshots.
 
   .. code-block:: console
 
-     $ manila snapshot-list
-     +--------------------------------------+--------------------------------------+-----------+------------+------------+
-     | ID                                   | Share ID                             | Status    | Name       | Share Size |
-     +--------------------------------------+--------------------------------------+-----------+------------+------------+
-     | 8a18aa77-7500-4e56-be8f-6081146f47f1 | 83b0772b-00ad-4e45-8fad-106b9d4f1719 | available | mysnapshot | 1          |
-     +--------------------------------------+--------------------------------------+-----------+------------+------------+
+     $ openstack share snapshot list
+    +--------------------------------------+--------+
+    | ID                                   | Name   |
+    +--------------------------------------+--------+
+    | 7861eed0-8634-41e0-a57e-a1d87ad48a1b | mysnap |
+    +--------------------------------------+--------+
+
+
+Mount a snapshot
+----------------
+
+* Allow access to the snapshot.
+
+  .. note::
+
+     To mount a snapshot, the share type of the parent share must contain the
+     capability extra-spec ``mount_snapshot_support=True``.
+
+  .. code-block:: console
+
+     $ openstack share snapshot access create mysnap ip 192.168.1.0/24
+    +-------------+--------------------------------------+
+    | Field       | Value                                |
+    +-------------+--------------------------------------+
+    | id          | 89e36a97-19d8-430c-b920-6d930ea27464 |
+    | access_type | ip                                   |
+    | access_to   | 192.168.1.0/24                       |
+    | state       | queued_to_apply                      |
+    +-------------+--------------------------------------+
+
+* List snapshot access.
+
+  .. code-block:: console
+
+     $ openstack share snapshot access list mysnap
+    +--------------------------------------+-------------+----------------+--------+
+    | ID                                   | Access Type | Access To      | State  |
+    +--------------------------------------+-------------+----------------+--------+
+    | 89e36a97-19d8-430c-b920-6d930ea27464 | ip          | 192.168.1.0/24 | active |
+    +--------------------------------------+-------------+----------------+--------+
+
+Then proceed to mounting the snapshot on the clients whose access was created.
+
+* Delete snapshot access rule.
+
+  .. code-block:: console
+
+     $ openstack share snapshot access delete mysnap 89e36a97-19d8-430c-b920-6d930ea27464
+
 
 Create share from snapshot
 --------------------------
@@ -775,13 +876,12 @@ Create share from snapshot
 
   .. code-block:: console
 
-     $ manila list
-     +--------------------------------------+-----------------+------+-------------+-----------+-----------+-----------------+-----------------------------+-------------------+
-     | ID                                   | Name            | Size | Share Proto | Status    | Is Public | Share Type Name | Host                        | Availability Zone |
-     +--------------------------------------+-----------------+------+-------------+-----------+-----------+-----------------+-----------------------------+-------------------+
-     | 83b0772b-00ad-4e45-8fad-106b9d4f1719 | myshare         | 1    | NFS         | available | False     | default         | nosb-devstack@london#LONDON | nova              |
-     | 2a9336ea-3afc-4443-80bb-398f4bdb3a93 | mysharefromsnap | 1    | NFS         | available | False     | default         | nosb-devstack@london#LONDON | nova              |
-     +--------------------------------------+-----------------+------+-------------+-----------+-----------+-----------------+-----------------------------+-------------------+
+     $ openstack share list
+    +--------------------------------------+---------+------+-------------+-----------+-----------+-----------------+-------------------------------------------+-------------------+
+    | ID                                   | Name    | Size | Share Proto | Status    | Is Public | Share Type Name | Host                                      | Availability Zone |
+    +--------------------------------------+---------+------+-------------+-----------+-----------+-----------------+-------------------------------------------+-------------------+
+    | bf7ffbb7-73a5-44fe-a93e-73cbd5a9197d | myshare |    1 | NFS         | available | False     | default         | oid-na-scale-1@bogota#fake_pool_for_DELTA | manila-zone-3     |
+    +--------------------------------------+---------+------+-------------+-----------+-----------+-----------------+-------------------------------------------+-------------------+
 
 * Show the share created from snapshot.
 

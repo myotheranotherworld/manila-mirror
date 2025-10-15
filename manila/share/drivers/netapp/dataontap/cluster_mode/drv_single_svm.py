@@ -99,9 +99,9 @@ class NetAppCmodeSingleSvmShareDriver(driver.ShareDriver):
         raise NotImplementedError
 
     def update_access(self, context, share, access_rules, add_rules,
-                      delete_rules, **kwargs):
+                      delete_rules, update_rules, **kwargs):
         self.library.update_access(context, share, access_rules, add_rules,
-                                   delete_rules, **kwargs)
+                                   delete_rules, update_rules, **kwargs)
 
     def _update_share_stats(self, data=None):
         data = self.library.get_share_stats(
@@ -315,7 +315,8 @@ class NetAppCmodeSingleSvmShareDriver(driver.ShareDriver):
 
     def choose_share_server_compatible_with_share(self, context, share_servers,
                                                   share, snapshot=None,
-                                                  share_group=None):
+                                                  share_group=None,
+                                                  encryption_key_ref=None):
         raise NotImplementedError
 
     def choose_share_server_compatible_with_share_group(
@@ -367,3 +368,9 @@ class NetAppCmodeSingleSvmShareDriver(driver.ShareDriver):
                                    share_server=None):
         self.library.update_share_from_metadata(
             context, share, metadata, share_server=share_server)
+
+    def update_share_network_subnet_from_metadata(self, context,
+                                                  share_network,
+                                                  share_network_subnet,
+                                                  share_server, metadata):
+        raise NotImplementedError

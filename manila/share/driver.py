@@ -290,8 +290,13 @@ class ShareDriver(object):
         # Indicates whether a driver supports adding subnet with its
         # allocations to an in-use share network availability zone. This
         # property will be saved in every new share server.
+        self.restore_to_target_support = False
+        # Indicates whether a driver supports out of place restores
+        # to a share other then the source of a given backup.
         self.network_allocation_update_support = False
         self.dhss_mandatory_security_service_association = {}
+        self.share_replicas_migration_support = False
+        self.encryption_support = None
 
         self.pools = []
         if self.configuration:
@@ -800,7 +805,7 @@ class ShareDriver(object):
         raise NotImplementedError()
 
     def update_access(self, context, share, access_rules, add_rules,
-                      delete_rules, share_server=None):
+                      delete_rules, update_rules, share_server=None):
         """Update access rules for given share.
 
         ``access_rules`` contains all access_rules that need to be on the
@@ -841,6 +846,8 @@ class ShareDriver(object):
                added. access_rules already contains these rules.
         :param delete_rules: Empty List or List of access rules which should be
                removed. access_rules doesn't contain these rules.
+        :param update_rules: Empty List or List of access rules which should be
+               updated. access_rules already contains these rules.
         :param share_server: None or Share server model
         :returns: None, or a dictionary of updates in the format::
 
@@ -967,7 +974,8 @@ class ShareDriver(object):
 
     def choose_share_server_compatible_with_share(self, context, share_servers,
                                                   share, snapshot=None,
-                                                  share_group=None):
+                                                  share_group=None,
+                                                  encryption_key_ref=None):
         """Method that allows driver to choose share server for provided share.
 
         If compatible share-server is not found, method should return None.
@@ -977,6 +985,7 @@ class ShareDriver(object):
         :param share:  share model
         :param snapshot: snapshot model
         :param share_group: ShareGroup model with shares
+        :param encryption_key_ref: Encryption key reference
         :returns: share-server or None
         """
         # If creating in a share group, use its share server
@@ -1357,6 +1366,9 @@ class ShareDriver(object):
                 self.network_allocation_update_support),
             share_server_multiple_subnet_support=False,
             mount_point_name_support=False,
+            share_replicas_migration_support=(
+                self.share_replicas_migration_support),
+            encryption_support=self.encryption_support,
         )
         if isinstance(data, dict):
             common.update(data)
@@ -3745,5 +3757,23 @@ class ShareDriver(object):
         :param metadata: Dict contains key-value pair where driver will
             perform necessary action based on key.
         :param share_server: Reference to the share server.
+        """
+        raise NotImplementedError()
+
+    def update_share_network_subnet_from_metadata(self, context,
+                                                  share_network,
+                                                  share_network_subnet,
+                                                  share_server, metadata):
+        """Update the share network subnet from metadata.
+
+        Driver must implement this method if it can perform some action on
+        given resource (i.e. share network subnet) based on provided metadata.
+
+        :param context: The 'context.RequestContext' object for the request.
+        :param share_network: share network model
+        :param share_network_subnet: share network subnet model
+        :param share_server: share-server model.
+        :param metadata: Dict contains key-value pair where driver will
+            perform necessary action based on key.
         """
         raise NotImplementedError()

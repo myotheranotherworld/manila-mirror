@@ -370,7 +370,8 @@ class HPE3ParShareDriver(driver.ShareDriver):
 
     def choose_share_server_compatible_with_share(self, context, share_servers,
                                                   share, snapshot=None,
-                                                  share_group=None):
+                                                  share_group=None,
+                                                  encryption_key_ref=None):
         """Method that allows driver to choose share server for provided share.
 
         If compatible share-server is not found, method should return None.
@@ -552,7 +553,7 @@ class HPE3ParShareDriver(driver.ShareDriver):
         pass
 
     def update_access(self, context, share, access_rules, add_rules,
-                      delete_rules, share_server=None):
+                      delete_rules, update_rules, share_server=None):
         """Update access to the share."""
         extra_specs = None
         if 'NFS' == share['share_proto']:  # Avoiding DB call otherwise

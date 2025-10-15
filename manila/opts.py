@@ -33,6 +33,7 @@ import manila.db.base
 import manila.exception
 import manila.image
 import manila.image.glance
+import manila.keymgr.barbican
 import manila.message.api
 import manila.network
 import manila.network.linux.interface
@@ -45,7 +46,6 @@ import manila.scheduler.drivers.simple
 import manila.scheduler.host_manager
 import manila.scheduler.manager
 import manila.scheduler.scheduler_options
-import manila.scheduler.weighers
 import manila.scheduler.weighers.capacity
 import manila.scheduler.weighers.pool
 import manila.service
@@ -55,8 +55,8 @@ import manila.share.drivers.cephfs.driver
 import manila.share.drivers.container.driver
 import manila.share.drivers.container.storage_helper
 import manila.share.drivers.dell_emc.driver
-import manila.share.drivers.dell_emc.plugins.isilon.isilon
 import manila.share.drivers.dell_emc.plugins.powermax.connection
+import manila.share.drivers.dell_emc.plugins.powerscale.powerscale
 import manila.share.drivers.generic
 import manila.share.drivers.glusterfs
 import manila.share.drivers.glusterfs.common
@@ -94,7 +94,6 @@ import manila.share.manager
 import manila.volume
 import manila.volume.cinder
 import manila.wsgi.eventlet_server
-
 
 # List of *all* options in [DEFAULT] namespace of manila.
 # Any new option list or option needs to be registered here.
@@ -174,6 +173,7 @@ _global_opt_lists = [
     manila.share.drivers.netapp.options.netapp_connection_opts,
     manila.share.drivers.netapp.options.netapp_transport_opts,
     manila.share.drivers.netapp.options.netapp_basicauth_opts,
+    manila.share.drivers.netapp.options.netapp_certificateauth_opts,
     manila.share.drivers.netapp.options.netapp_provisioning_opts,
     manila.share.drivers.netapp.options.netapp_data_motion_opts,
     manila.share.drivers.netapp.options.netapp_backup_opts,
@@ -217,6 +217,7 @@ _opts = [
 _opts.extend(manila.network.neutron.api.list_opts())
 _opts.extend(manila.compute.nova.list_opts())
 _opts.extend(manila.image.glance.list_opts())
+_opts.extend(manila.keymgr.barbican.list_opts())
 _opts.extend(manila.volume.cinder.list_opts())
 
 

@@ -40,6 +40,8 @@ nova_opts = [
                help='Version of Nova API to be used.'),
     cfg.StrOpt('endpoint_type',
                default='publicURL',
+               choices=['publicURL', 'internalURL', 'adminURL',
+                        'public', 'internal', 'admin'],
                help='Endpoint type to be used with nova client calls.'),
     cfg.StrOpt('region_name',
                help='Region name for connecting to nova.'),
@@ -73,7 +75,7 @@ def _untranslate_server_summary_view(server):
     d = {}
     d['id'] = server.id
     d['status'] = server.status
-    d['flavor'] = server.flavor['id']
+    d['flavor'] = server.flavor.get('id') or server.flavor['original_name']
     d['name'] = server.name
     d['image'] = server.image['id']
     d['created'] = server.created
@@ -183,15 +185,12 @@ class API(base.Base):
 
     @translate_server_exception
     def instance_volumes_list(self, context, instance_id):
-        from manila.volume import cinder
 
         volumes = novaclient(context).volumes.get_server_volumes(instance_id)
 
-        for volume in volumes:
-            volume_data = cinder.cinderclient(context).volumes.get(volume.id)
-            volume.name = volume_data.name
-
-        return volumes
+        # NOTE(pas-ha): Nova API 2.89 dropped 'id' field of the volume object,
+        # so we use 'volumeId' field that is present in all API versions.
+        return [volume.volumeId for volume in volumes]
 
     @translate_server_exception
     def server_update(self, context, instance_id, name):

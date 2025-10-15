@@ -29,7 +29,6 @@ import socket
 from oslo_config import cfg
 from oslo_log import log
 from oslo_middleware import cors
-from oslo_policy import opts as policy_opts
 from oslo_utils import netutils
 
 from manila.common import constants
@@ -147,6 +146,13 @@ global_opts = [
                      '(element of the list is <driver_updatable_key>, '
                      'i.e max_files) can be passed to share drivers as part '
                      'of metadata create/update operations.'),
+    cfg.ListOpt('driver_updatable_subnet_metadata',
+                default=[],
+                help='Metadata keys that will decide which share network '
+                     'subnet metadata (element of the list is '
+                     '<driver_updatable_key>, e.g. pnfs) can be passed to '
+                     'share drivers as part of metadata create/update '
+                     'operations.'),
     cfg.BoolOpt('update_shares_status_on_ensure',
                 default=True,
                 help='Whether Manila should update the status of all shares '
@@ -207,5 +213,3 @@ def set_lib_defaults():
                        'DELETE',
                        'PATCH']
     )
-    # Update default value of oslo.policy policy_file config option.
-    policy_opts.set_defaults(CONF, 'policy.yaml')

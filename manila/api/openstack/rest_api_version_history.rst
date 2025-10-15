@@ -455,15 +455,33 @@ user documentation.
 ----
    Added optional ``mount_point_name`` field to share.
 
-2.85
-----
+2.85 (Maximum in 2024.1/Caracal)
+--------------------------------
    Added ``backup_type`` field to share backup object.
 
 2.86
 ----
    Added ensure shares API.
 
-2.87
-----
+2.87 (Maximum in 2024.2/Dalmatian)
+----------------------------------
   Added Metadata API methods (GET, PUT, POST, DELETE)
   to Share Export Locations.
+
+2.88
+----
+  Allows updating the access rule's access type.
+
+
+2.89 (Maximum in 2025.1/Epoxy)
+------------------------------
+  Added support for passing share network subnet metadata updates to share
+  backend driver.
+
+2.90
+----
+  Added ``encryption_key_ref`` option to share create API.
+
+2.91 (Maximum in 2025.2/Flamingo)
+---------------------------------
+  Added targeted restores to the share backup API

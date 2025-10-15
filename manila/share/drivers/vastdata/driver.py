@@ -79,6 +79,16 @@ OPTS = [
         help="Password for VAST management",
         secret=True
     ),
+    cfg.StrOpt(
+        "vast_api_token",
+        default="",
+        secret=True,
+        help=(
+            "API token for accessing VAST mgmt. "
+            "If provided, it will be used instead "
+            "of 'san_login' and 'san_password'."
+        )
+    ),
 ]
 
 CONF = cfg.CONF
@@ -116,19 +126,29 @@ class VASTShareDriver(driver.ShareDriver):
 
         username = self.configuration.safe_get("vast_mgmt_user")
         password = self.configuration.safe_get("vast_mgmt_password")
+        api_token = self.configuration.safe_get("vast_api_token")
         host = self.configuration.safe_get("vast_mgmt_host")
         port = self.configuration.safe_get("vast_mgmt_port")
-        if not all((username, password, port)):
+        if not host:
             raise exception.VastDriverException(
-                reason="Not all required parameters are present."
-                       " Make sure you specified `vast_mgmt_host`,"
-                       " `vast_mgmt_port`, and `vast_mgmt_user` "
-                       "in manila.conf."
+                reason="`vast_mgmt_host` must be set in manila.conf."
+            )
+        # Require either (username & password) OR (API token)
+        if not ((username and password) or api_token):
+            raise exception.VastDriverException(
+                reason="Authentication failed: You must specify either "
+                       "`vast_mgmt_user` and `vast_mgmt_password`, "
+                       "or provide `vast_api_token` in manila.conf."
             )
         if port:
             host = f"{host}:{port}"
         self.rest = vast_rest.RestApi(
-            host, username, password, False, self.VERSION
+            host=host,
+            username=username,
+            password=password,
+            api_token=api_token,
+            ssl_verify=False,
+            plugin_version=self.VERSION,
         )
         LOG.debug("VAST Data driver setup is complete.")
 
@@ -169,7 +189,7 @@ class VASTShareDriver(driver.ShareDriver):
         return f"{root}/manila-{share_id}"
 
     def create_share(self, context, share, share_server=None):
-        return self._ensure_share(share)[0]
+        return self._ensure_share(share)
 
     def delete_share(self, context, share, share_server=None):
         """Called to delete a share"""
@@ -183,7 +203,7 @@ class VASTShareDriver(driver.ShareDriver):
 
     def update_access(
         self, context, share, access_rules,
-        add_rules, delete_rules, share_server=None
+        add_rules, delete_rules, update_rules, share_server=None
     ):
         """Update access rules for share."""
         rule_state_map = {}
