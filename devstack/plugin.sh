@@ -311,8 +311,8 @@ function configure_manila {
     set_config_opts $MANILA_CONFIGURE_GROUPS
     set_config_opts DEFAULT
     set_backend_availability_zones $MANILA_ENABLED_BACKENDS
-
     write_uwsgi_config "$MANILA_UWSGI_CONF" "$MANILA_WSGI" "/share" "" "manila-api"
+
 
     if [[ "$MANILA_ENFORCE_SCOPE" == True ]] ; then
         iniset $MANILA_CONF oslo_policy enforce_scope true
