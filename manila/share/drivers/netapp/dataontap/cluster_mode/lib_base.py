@@ -1794,6 +1794,10 @@ class NetAppCmodeFileStorageLibrary(object):
         if split is None:
             split = provisioning_options.pop('split')
 
+        # split in args takes precedence over split in provisioning_options
+        if split is None:
+            split = provisioning_options.pop('split')
+
         LOG.debug('Creating share from snapshot %s', snapshot['id'])
         vserver_client.create_volume_clone(
             share_name, parent_share_name, parent_snapshot_name,
